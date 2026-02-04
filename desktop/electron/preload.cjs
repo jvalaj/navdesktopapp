@@ -1,16 +1,10 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const path = require("node:path");
+const path = require("path");
 
 function toFileUrl(filePath) {
   if (!filePath) return "";
-  try {
-    const url = require("node:url");
-    const fn = url.pathToFileURL;
-    if (typeof fn === "function") return fn.call(url, filePath).toString();
-  } catch (_) {}
-  const normalized = path.resolve(filePath).replace(/\\/g, "/");
-  const withLeading = normalized.startsWith("/") ? normalized : "/" + normalized;
-  return "file://" + encodeURI(withLeading);
+  const normalized = path.normalize(filePath).replace(/\\/g, "/");
+  return "navai://" + encodeURI(normalized);
 }
 
 contextBridge.exposeInMainWorld("navai", {
@@ -25,5 +19,7 @@ contextBridge.exposeInMainWorld("navai", {
   setAgentWindowMode: (enabled) => ipcRenderer.invoke("window:agent-mode", enabled),
   setCaptureMode: (enabled) => ipcRenderer.invoke("window:capture-mode", enabled),
   openFile: (filePath) => ipcRenderer.invoke("file:open", filePath),
+  storagePaths: () => ipcRenderer.invoke("storage:paths"),
+  openStorageDir: (which) => ipcRenderer.invoke("storage:open", which),
   fileUrl: toFileUrl
 });

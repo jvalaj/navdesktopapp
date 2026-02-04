@@ -1,9 +1,10 @@
-import React, { useEffect, useMemo, useState, useRef } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import ActivityTrace from "./components/ActivityTrace.jsx";
 import SettingsModal from "./components/SettingsModal.jsx";
 import ApiKeyModal from "./components/ApiKeyModal.jsx";
 import ImageViewer from "./components/ImageViewer.jsx";
 import EntranceScreen from "./components/EntranceScreen.jsx";
+import Toast from "./components/Toast.jsx";
 import { nowLabel, uid } from "./components/utils.js";
 import logoUrl from "./assets/logo.png";
 
@@ -65,11 +66,14 @@ export default function App() {
     dryRun: false
   });
   const [search, setSearch] = useState("");
-  const captureModeToggleRef = useRef(0); // throttle rapid capture mode toggles
   const [ws, setWs] = useState(null);
   const [wsStatus, setWsStatus] = useState("connecting");
   const [wsError, setWsError] = useState("");
   const [showEntrance, setShowEntrance] = useState(true);
+  const [toast, setToast] = useState(null);
+  const [showApiKeyModal, setShowApiKeyModal] = useState(false);
+  const [apiKeyModalSkipped, setApiKeyModalSkipped] = useState(false);
+  const [storagePaths, setStoragePaths] = useState({ conversationsDir: "", screenshotsDir: "" });
 
   const activeConversation = useMemo(
     () => conversations.find((c) => c.id === activeId),
@@ -81,9 +85,20 @@ export default function App() {
   }, [conversations]);
 
   useEffect(() => {
-    window.navai?.apiKeyStatus().then(setApiKeyStatus);
+    const checkApiKey = async () => {
+      try {
+        const status = await window.navai?.apiKeyStatus();
+        console.log("Initial API key status:", status);
+        setApiKeyStatus(status || { connected: false });
+      } catch (err) {
+        console.error("Error checking API key status:", err);
+        setApiKeyStatus({ connected: false });
+      }
+    };
+    
+    checkApiKey();
     window.navai?.settingsGet().then((s) => s && setSettings((prev) => ({ ...prev, ...s })));
-    window.navai?.setCaptureMode?.(false);
+    window.navai?.storagePaths?.().then((p) => p && setStoragePaths((prev) => ({ ...prev, ...p })));
   }, []);
 
   useEffect(() => {
@@ -144,9 +159,6 @@ export default function App() {
     if (payload.type === "status") {
       setRunning(payload.state === "running");
       window.navai?.setAgentWindowMode?.(payload.state === "running");
-      if (payload.state !== "running") {
-        window.navai?.setCaptureMode?.(false);
-      }
       return;
     }
 
@@ -199,18 +211,6 @@ export default function App() {
               ...last,
               activity: { ...last.activity, steps }
             };
-            if (payload.title && payload.title.toLowerCase().includes("screenshot") && running) {
-              const now = Date.now();
-              const minInterval = 1500; // prevent rapid hide/show glitching
-              if (now - captureModeToggleRef.current > minInterval) {
-                captureModeToggleRef.current = now;
-                window.navai?.setCaptureMode?.(true);
-                setTimeout(() => {
-                  window.navai?.setCaptureMode?.(false);
-                  captureModeToggleRef.current = Date.now();
-                }, 800);
-              }
-            }
           }
         }
 
@@ -236,7 +236,6 @@ export default function App() {
               };
             }
           }
-          window.navai?.setCaptureMode?.(false);
         }
 
         if (payload.type === "tool") {
@@ -432,7 +431,7 @@ export default function App() {
                           deleteConversation(c.id);
                         }}
                       >
-                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" aria-hidden="true" fill="#dc2626">
                           <path d="M9 3h6l1 2h4v2H4V5h4l1-2z" />
                           <path d="M6 9h12l-1 11H7L6 9z" />
                         </svg>
@@ -441,6 +440,29 @@ export default function App() {
                   ))}
                 </div>
                 <div className="sidebar-footer">
+                  {storagePaths?.conversationsDir || storagePaths?.screenshotsDir ? (
+                    <div className="storage-block">
+                      <div className="storage-title">Storage</div>
+                      <button
+                        className="storage-link"
+                        type="button"
+                        onClick={() => window.navai?.openStorageDir?.("conversations")}
+                        title="Open conversations folder"
+                      >
+                        <span className="storage-label">Conversations (.txt)</span>
+                        <span className="storage-path">{storagePaths.conversationsDir || "—"}</span>
+                      </button>
+                      <button
+                        className="storage-link"
+                        type="button"
+                        onClick={() => window.navai?.openStorageDir?.("screenshots")}
+                        title="Open screenshots folder"
+                      >
+                        <span className="storage-label">Screenshots</span>
+                        <span className="storage-path">{storagePaths.screenshotsDir || "—"}</span>
+                      </button>
+                    </div>
+                  ) : null}
                   <button
                     className={`btn-outline ${sidebarCollapsed ? "icon-only" : ""}`}
                     onClick={() => setSettingsOpen(true)}
@@ -537,14 +559,29 @@ export default function App() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter") {
                     e.preventDefault();
-                    sendPrompt();
+                    if (running) {
+                      stopAgent();
+                    } else {
+                      sendPrompt();
+                    }
                   }
                 }}
               />
-              <button className="btn-primary send-inline" onClick={sendPrompt} disabled={!ws}>
-                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
-                  <path d="M7 17L17 7M17 7H7M17 7V17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+              <button
+                className={`btn-primary send-inline ${running ? "stop-btn" : ""}`}
+                onClick={running ? stopAgent : sendPrompt}
+                disabled={!ws && !running}
+                title={running ? "Stop" : "Send"}
+              >
+                {running ? (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <rect x="6" y="6" width="12" height="12" rx="1" fill="currentColor" />
+                  </svg>
+                ) : (
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M7 17L17 7M17 7H7M17 7V17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
               </button>
             </div>
           </div>
@@ -553,16 +590,54 @@ export default function App() {
         {settingsOpen && (
           <SettingsModal
             settings={settings}
+            apiKeyStatus={apiKeyStatus}
             onClose={() => setSettingsOpen(false)}
-            onSave={(next) => {
-              setSettings(next);
-              window.navai?.settingsSet(next);
+            onSave={async (next) => {
+              try {
+                setSettings(next);
+                const result = await window.navai?.settingsSet(next);
+                if (result?.ok !== false) {
+                  setToast({ message: "Settings saved", type: "success" });
+                  setSettingsOpen(false);
+                } else {
+                  setToast({ message: "Unable to save settings", type: "error" });
+                }
+              } catch (error) {
+                setToast({ message: "Unable to save settings", type: "error" });
+              }
             }}
-            onUpdateKey={() => setApiKeyStatus({ connected: false })}
+            onAddApiKey={() => {
+              setShowApiKeyModal(true);
+              setApiKeyModalSkipped(false);
+            }}
           />
         )}
 
-        {!apiKeyStatus.connected && <ApiKeyModal onSaved={() => window.navai?.apiKeyStatus().then(setApiKeyStatus)} />}
+        {(!apiKeyStatus.connected && (showApiKeyModal || !apiKeyModalSkipped)) && (
+          <ApiKeyModal 
+            onSaved={async () => {
+              const status = await window.navai?.apiKeyStatus();
+              setApiKeyStatus(status || { connected: false });
+              setShowApiKeyModal(false);
+              setApiKeyModalSkipped(true);
+              setToast({ message: "API key saved", type: "success" });
+            }}
+            onSkip={() => {
+              setApiKeyModalSkipped(true);
+              setShowApiKeyModal(false);
+            }}
+          />
+        )}
+
+        {toast && (
+          <div className="toast-container">
+            <Toast
+              message={toast.message}
+              type={toast.type}
+              onClose={() => setToast(null)}
+            />
+          </div>
+        )}
 
         {viewer && (
           <ImageViewer

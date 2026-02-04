@@ -33,20 +33,29 @@ import typeandclick
 load_dotenv()
 
 # Suppress dock icon on macOS (prevents bouncing/badging)
+# This must be done before any GUI operations
 try:
     from AppKit import NSApplication, NSActivationPolicyAccessory
     app = NSApplication.sharedApplication()
-    app.setActivationPolicy_(NSActivationPolicyAccessory)  # No dock icon
+    app.setActivationPolicy_(NSActivationPolicyAccessory)  # No dock icon, no menu bar
 except Exception:
     pass  # AppKit not available or failed - not critical
 
 # Screen capture settings
-SCREENSHOT_DIR = Path("screenshots")
-MEMORY_DIR = Path("conversations")
+def _env_path(key: str) -> Optional[str]:
+    val = os.environ.get(key)
+    if val is None:
+        return None
+    val = str(val).strip()
+    return val or None
+
+
+SCREENSHOT_DIR = Path(_env_path("NAVAI_SCREENSHOTS_DIR") or "screenshots")
+MEMORY_DIR = Path(_env_path("NAVAI_CONVERSATIONS_DIR") or "conversations")
 
 # Create directories
-SCREENSHOT_DIR.mkdir(exist_ok=True)
-MEMORY_DIR.mkdir(exist_ok=True)
+SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+MEMORY_DIR.mkdir(parents=True, exist_ok=True)
 
 
 class ConversationMemory:
@@ -573,19 +582,25 @@ class Agent:
 
 SCREEN SIZE: {typeandclick.SCREEN_WIDTH}x{typeandclick.SCREEN_HEIGHT} pixels
 
+IMPORTANT - YOU ALREADY RECEIVE VISION DATA:
+At the start of each turn, you receive:
+- A VISION ANALYSIS summary with clickable elements and their IDs
+- An ANNOTATED SCREENSHOT showing each element labeled with IDs (0, 1, 2, etc.)
+
+YOU DO NOT need to call "see" or "detect_elements" to see the screen - you already have this data!
+
+ONLY use "see" or "detect_elements" if:
+- The UI has changed after an action and you need to see the new state
+- You need a fresh look at the current screen state
+
 AVAILABLE ACTIONS:
 
-1. see - Take a regular screenshot and show it to you
-   Use this when you just need to look at the screen
+1. see - Take a fresh screenshot (use only if you need to see the screen again after UI changes)
 
-2. detect_elements - Find all clickable elements on screen
-   VITAL: This shows you WHAT you can click with NUMBERED IDs
-   Returns: Annotated screenshot with each element labeled 0, 1, 2, 3, etc.
-   Use this BEFORE clicking anything - it tells you what element_id numbers are available
-   Example: If you see "[5]" on a button in the annotated image, use {{"element_id": 5}} to click it
+2. detect_elements - Run fresh vision analysis to get current element IDs (use only if UI has changed)
 
 3. click_element(element_id, click_type) - Click on a UI element by its ID
-   element_id: JUST the number (integer) shown on the annotated image - e.g., 5, 12, 0
+   element_id: JUST the number (integer) from the vision analysis - e.g., 5, 12, 0
    click_type: 'left' (default), 'right' (right-click), or 'double'
    SHORTCUTS: You can also use "left_click", "right_click", "double_click" as actions directly
    Examples:
@@ -618,14 +633,11 @@ AVAILABLE ACTIONS:
 10. done - Task is complete
 
 WORKFLOW:
-- To see the screen: use "see"
-- To click something you MUST:
-  a) First use "detect_elements" - this returns an annotated screenshot with numbered IDs on each element
-  b) Look at the annotated image to find the NUMBER (e.g. 5, 12, 0) on the element you want
-  c) Use "click_element" with params {{"element_id": 5}} - JUST the number, nothing else
+- You receive VISION ANALYSIS and ANNOTATED SCREENSHOT automatically at the start
+- Look at the vision summary to find element IDs - you can click them directly!
+- Only use "see" or "detect_elements" if the UI has changed and you need fresh data
 - CRITICAL: element_id is ALWAYS a plain integer like 0, 1, 2, 5, 10, etc.
 - NEVER include the description text with element_id - just extract the number
-- If unsure what to do, use "see" or "detect_elements" - do NOT use "wait" unless the UI needs time to load
 - For typing/keyboard: use "type", "press_key", or "hotkey"
 
 RESPONSE FORMAT:
@@ -636,18 +648,18 @@ Respond with JSON:
     "params": {{"param": "value"}}  // omit for 'see', 'detect_elements', 'done'
 }}
 
-Example:
+Example - clicking directly with existing vision data:
 {{
-    "thought": "I need to click on the Safari button. First let me use detect_elements to see all clickable items with their IDs.",
-    "action": "detect_elements",
-    "params": {{}}
-}}
-
-Then after seeing the annotated image:
-{{
-    "thought": "I can see the Safari button is element 5 at position (245, 12)",
+    "thought": "I can see from the vision analysis that the Safari button is element 5. I'll click it directly.",
     "action": "click_element",
     "params": {{"element_id": 5, "click_type": "left"}}
+}}
+
+Example - after UI changes, getting fresh data:
+{{
+    "thought": "After clicking, the UI has changed. I need to see the new state to find the next element.",
+    "action": "detect_elements",
+    "params": {{}}
 }}
 
 The user's goal will be provided in the user message."""

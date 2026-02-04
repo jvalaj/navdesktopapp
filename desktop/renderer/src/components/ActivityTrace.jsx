@@ -10,16 +10,16 @@ export default function ActivityTrace({ steps, onOpen }) {
         {open ? "Hide" : "Show"} live activity
       </div>
       {open
-        ? steps.map((step, idx) => (
-            <div className="step-card" key={step?.id ?? `step-${idx}`}>
+        ? steps.map((step, stepIdx) => (
+            <div className="step-card" key={`step-${stepIdx}`}>
               <div>
                 <div className="step-title">{step.title}</div>
                 {step.caption && <div className="step-caption">{step.caption}</div>}
                 {step.screenshots?.length ? (
                   <div className="thumb-grid">
-                    {step.screenshots.map((shot, idx) => (
+                    {step.screenshots.map((shot, shotIdx) => (
                       <img
-                        key={`${step.id}-${idx}`}
+                        key={`step-${stepIdx}-shot-${shotIdx}`}
                         className="thumb"
                         src={
                           typeof window.navai?.fileUrl === "function"

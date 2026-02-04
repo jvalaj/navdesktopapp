@@ -148,11 +148,16 @@ async def run_agent(conversation_id, prompt, settings):
     allow_send_screenshots = settings.get("allowSendScreenshots", True)
     dry_run = settings.get("dryRun", False)
 
+    # Save the user's prompt to conversation memory
+    agent.memory.add("user", prompt, {"type": "goal"})
+
     assistant_message_id = str(uuid.uuid4())
 
     for step in range(max_steps):
         if stop_event.is_set():
             await emit_message_delta(assistant_message_id, "assistant", "\nStopped by user.", conversation_id)
+            # Save to conversation memory
+            agent.memory.add("assistant", "Stopped by user", {"step": step + 1, "status": "stopped"})
             break
 
         step_id = f"{conversation_id}-{step + 1}"
@@ -165,11 +170,13 @@ async def run_agent(conversation_id, prompt, settings):
             screenshot_to_show = agent.last_vision_data.get("annotated")
             vision_summary = agent.get_ui_summary(agent.last_vision_data.get("boxes", []))
         else:
-            await emit_step(step_id, "Taking screenshot")
+            await emit_step(step_id, "Taking screenshot and analyzing UI")
             vision_data = agent.run_vision_analysis()
             screenshot_to_show = vision_data.get("annotated")
             vision_summary = agent.get_ui_summary(vision_data.get("boxes", []))
-            await emit_screenshot(step_id, vision_data.get("annotated"), "Annotated screenshot", conversation_id)
+            # Emit both screenshots so user can see what the agent sees
+            await emit_screenshot(step_id, vision_data.get("screenshot"), "Screenshot taken", conversation_id)
+            await emit_screenshot(step_id, vision_data.get("annotated"), "Annotated screenshot with element IDs", conversation_id)
 
         if not allow_send_screenshots:
             screenshot_to_show = None
@@ -190,6 +197,8 @@ async def run_agent(conversation_id, prompt, settings):
 
         if action in (None, "done"):
             await emit_step(step_id, "Done", "Agent reported completion", conversation_id)
+            # Save to conversation memory
+            agent.memory.add("assistant", f"Completed: {thought}", {"step": step + 1, "status": "done"})
             break
 
         await emit_step(step_id, f"{action}", conversation_id=conversation_id)
@@ -201,15 +210,27 @@ async def run_agent(conversation_id, prompt, settings):
         result = agent.execute_action(action, params)
         if result.get("success"):
             await emit_tool(step_id, result.get("message", "Executed"), conversation_id)
+            # Save to conversation memory
+            agent.memory.add(
+                "assistant",
+                f"Executed {action}: {result.get('message', 'Success')}",
+                {"step": step + 1, "action": action, "result": "success"}
+            )
         else:
             await emit_tool(step_id, result.get("error", "Error"), conversation_id)
+            # Save to conversation memory
+            agent.memory.add(
+                "assistant",
+                f"Failed {action}: {result.get('error', 'Unknown error')}",
+                {"step": step + 1, "action": action, "result": "error"}
+            )
 
-        # Only one screenshot per step is shown in the UI (the one from vision at step start).
-        # We do not emit result.screenshot / result.annotated_screenshot here to avoid flooding.
-
+        # Emit screenshots for see and detect_elements actions so user can see what the agent is doing
         normalized_action = result.get("_normalized_action", action)
+
+        # Only clear vision data after actions that MODIFY the UI
+        # "see" and "detect_elements" just observe, so they should preserve the vision data
         if normalized_action in (
-            "see",
             "click_element",
             "click_coords",
             "type",
@@ -220,6 +241,10 @@ async def run_agent(conversation_id, prompt, settings):
             agent.last_vision_data = None
 
         await asyncio.sleep(delay_after_action)
+
+    # Log final conversation save status
+    print(f"Conversation saved to: {agent.memory.memory_file}")
+    print(f"Total entries in memory: {len(agent.memory.history)}")
 
     await emit_status("idle")
 

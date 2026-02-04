@@ -1,8 +1,16 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, screen } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, screen, protocol, net } from "electron";
 import path from "node:path";
+import fs from "node:fs";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import Store from "electron-store";
-import { pathToFileURL } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: "navai", privileges: { standard: true, supportFetchAPI: true } }
+]);
 
 const isDev = !app.isPackaged;
 const store = new Store({ name: "nav-ai" });
@@ -16,6 +24,14 @@ let restoreBounds = null;
 let restoreOpacity = 1;       // used by setAgentWindowMode
 let captureRestoreOpacity = 1; // used by setCaptureMode (separate to avoid cross-talk)
 let animTimer = null;
+
+function getStorageDirs() {
+  // Per-user, per-app directory (dynamic for whoever is running the app)
+  const base = path.join(app.getPath("userData"), "storage");
+  const conversationsDir = path.join(base, "conversations");
+  const screenshotsDir = path.join(base, "screenshots");
+  return { base, conversationsDir, screenshotsDir };
+}
 
 function resolvePythonPath() {
   const stored = store.get("pythonPath");
@@ -32,16 +48,28 @@ async function startPythonServer() {
   const pythonPath = resolvePythonPath();
   const serverScript = resolveServerScript();
   const apiKey = store.get(APIKEY_KEY);
+  const { conversationsDir, screenshotsDir } = getStorageDirs();
+  try {
+    fs.mkdirSync(conversationsDir, { recursive: true });
+    fs.mkdirSync(screenshotsDir, { recursive: true });
+  } catch (err) {
+    console.error("Failed to create storage directories:", err);
+  }
   const env = {
     ...process.env,
     NAVAI_SERVER_PORT: String(serverPort),
-    ANTHROPIC_API_KEY: apiKey || ""
+    ANTHROPIC_API_KEY: apiKey || "",
+    NAVAI_CONVERSATIONS_DIR: conversationsDir,
+    NAVAI_SCREENSHOTS_DIR: screenshotsDir,
+    // Prevent Python from showing in dock
+    PYTHONUNBUFFERED: "1"
   };
 
   try {
     pythonProc = spawn(pythonPath, [serverScript], {
       env,
-      stdio: "pipe"
+      stdio: "pipe",
+      detached: false
     });
   } catch (err) {
     console.error("Failed to spawn Python:", err);
@@ -67,6 +95,25 @@ async function startPythonServer() {
 }
 
 function createWindow() {
+  // Resolve preload path - use absolute path in dev, app.getAppPath() in production
+  let preloadPath;
+  if (isDev) {
+    // In dev, use the directory of this file (main.js) to find preload.cjs
+    // __dirname is reliable in ES modules when used this way
+    preloadPath = path.resolve(__dirname, "preload.cjs");
+  } else {
+    preloadPath = path.resolve(app.getAppPath(), "electron", "preload.cjs");
+  }
+
+  // Verify preload file exists
+  if (!fs.existsSync(preloadPath)) {
+    console.error(`Preload script not found at: ${preloadPath}`);
+    console.error(`App path: ${app.getAppPath()}`);
+    console.error(`__dirname: ${__dirname}`);
+  } else {
+    console.log(`Preload script found at: ${preloadPath}`);
+  }
+
   mainWindow = new BrowserWindow({
     width: 1220,
     height: 800,
@@ -74,9 +121,10 @@ function createWindow() {
     titleBarStyle: "hiddenInset",
     icon: iconPath,
     webPreferences: {
-      preload: path.resolve(app.getAppPath(), "electron", "preload.cjs"),
+      preload: preloadPath,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      sandbox: false
     }
   });
 
@@ -157,7 +205,48 @@ function setCaptureMode(enabled) {
   }
 }
 
+function resolveScreenshotPath(filePath) {
+  if (!filePath || typeof filePath !== "string") return null;
+  const appPath = app.getAppPath();
+  const parentDir = path.resolve(appPath, "..");
+  const { screenshotsDir } = getStorageDirs();
+  // Allow screenshots from per-user storage (and keep legacy roots for dev/back-compat)
+  const roots = [screenshotsDir, appPath, parentDir];
+  const normalized = path.normalize(filePath).replace(/^(\.\.(\/|\\))+/g, "").replace(/^\/+/, "");
+  let full = null;
+  if (path.isAbsolute(filePath)) {
+    full = path.normalize(filePath);
+  } else {
+    for (const r of roots) {
+      const candidate = path.resolve(r, normalized);
+      if (fs.existsSync(candidate)) {
+        full = candidate;
+        break;
+      }
+    }
+    if (!full) full = path.resolve(parentDir, normalized);
+  }
+  try {
+    const inRoot = roots.some((r) => {
+      const rel = path.relative(r, full);
+      return !rel.startsWith("..");
+    });
+    if (!inRoot || !fs.existsSync(full)) return null;
+    return full;
+  } catch (_) {
+    return null;
+  }
+}
+
 app.whenReady().then(async () => {
+  protocol.handle("navai", (request) => {
+    const urlPart = request.url.slice("navai://".length).replace(/^\/+/, "");
+    const decoded = decodeURIComponent(urlPart);
+    const full = resolveScreenshotPath(decoded);
+    if (!full) return new Response("Not found", { status: 404 });
+    return net.fetch(pathToFileURL(full).toString());
+  });
+
   createWindow();
   if (app.dock && iconPath) {
     try {
@@ -233,6 +322,22 @@ ipcMain.handle("py:restart", async () => {
 ipcMain.handle("file:open", async (_event, filePath) => {
   if (!filePath) return { ok: false };
   await shell.openPath(filePath);
+  return { ok: true };
+});
+
+ipcMain.handle("storage:paths", async () => {
+  const { conversationsDir, screenshotsDir } = getStorageDirs();
+  return { conversationsDir, screenshotsDir };
+});
+
+ipcMain.handle("storage:open", async (_event, which) => {
+  const { conversationsDir, screenshotsDir } = getStorageDirs();
+  const target =
+    which === "conversations" ? conversationsDir :
+    which === "screenshots" ? screenshotsDir :
+    null;
+  if (!target) return { ok: false };
+  await shell.openPath(target);
   return { ok: true };
 });
 

@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 
-export default function SettingsModal({ settings, onClose, onSave }) {
+export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus, onAddApiKey }) {
   const [form, setForm] = useState(settings);
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
@@ -9,6 +9,39 @@ export default function SettingsModal({ settings, onClose, onSave }) {
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <h3>Settings</h3>
+        
+        {/* API Key Section */}
+        <div style={{ 
+          marginBottom: 24, 
+          padding: 16, 
+          background: apiKeyStatus?.connected ? "rgba(152, 206, 0, 0.1)" : "rgba(201, 107, 107, 0.1)",
+          borderRadius: 12,
+          border: `1px solid ${apiKeyStatus?.connected ? "rgba(152, 206, 0, 0.3)" : "rgba(201, 107, 107, 0.3)"}`
+        }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
+                API Key
+              </div>
+              <div style={{ fontSize: 12, color: "var(--muted)" }}>
+                {apiKeyStatus?.connected ? "API key is configured" : "API key not added"}
+              </div>
+            </div>
+            {!apiKeyStatus?.connected && (
+              <button 
+                className="btn-primary" 
+                onClick={() => {
+                  onClose();
+                  onAddApiKey?.();
+                }}
+                style={{ padding: "8px 16px", fontSize: 13 }}
+              >
+                Add API Key
+              </button>
+            )}
+          </div>
+        </div>
+
         <div className="settings-grid">
           <label>
             Model
