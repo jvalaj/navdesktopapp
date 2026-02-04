@@ -292,30 +292,30 @@ function resolveScreenshotPath(filePath) {
   const { screenshotsDir } = getStorageDirs();
   // Allow screenshots from per-user storage (and keep legacy roots for dev/back-compat)
   const roots = [screenshotsDir, appPath, parentDir];
-  const normalized = path.normalize(filePath).replace(/^(\.\.(\/|\\))+/g, "").replace(/^\/+/, "");
-  let full = null;
+
+  // For absolute paths, normalize and check if it exists
   if (path.isAbsolute(filePath)) {
-    full = path.normalize(filePath);
-  } else {
-    for (const r of roots) {
-      const candidate = path.resolve(r, normalized);
-      if (fs.existsSync(candidate)) {
-        full = candidate;
-        break;
-      }
+    const normalized = path.normalize(filePath);
+    if (fs.existsSync(normalized)) {
+      // Check if the path is within one of the allowed roots
+      const inRoot = roots.some((r) => {
+        const rel = path.relative(r, normalized);
+        return !rel.startsWith("..");
+      });
+      return inRoot ? normalized : null;
     }
-    if (!full) full = path.resolve(parentDir, normalized);
-  }
-  try {
-    const inRoot = roots.some((r) => {
-      const rel = path.relative(r, full);
-      return !rel.startsWith("..");
-    });
-    if (!inRoot || !fs.existsSync(full)) return null;
-    return full;
-  } catch (_) {
     return null;
   }
+
+  // For relative paths, try each root
+  const normalized = path.normalize(filePath).replace(/^(\.\.(\/|\\))+/g, "").replace(/^\/+/, "");
+  for (const r of roots) {
+    const candidate = path.resolve(r, normalized);
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+  return null;
 }
 
 app.whenReady().then(async () => {
@@ -336,7 +336,10 @@ app.whenReady().then(async () => {
     }
     const decoded = decodeURIComponent(urlPart);
     const full = resolveScreenshotPath(decoded);
-    if (!full) return new Response("Not found", { status: 404 });
+    if (!full) {
+      console.log("navai:// 404:", decoded);
+      return new Response("Not found", { status: 404 });
+    }
     return net.fetch(pathToFileURL(full).toString());
   });
 

@@ -113,12 +113,11 @@ export default function App() {
 
   // Keep scrolling as new words stream in from message deltas.
   useEffect(() => {
-    if (!running) return;
-    // Wait for DOM paint of the updated bubble before scrolling.
+    // Always scroll to bottom when messages change, not just when running
     requestAnimationFrame(() => {
       threadEndRef.current?.scrollIntoView({ block: "end", behavior: "auto" });
     });
-  }, [running, lastMessageKey]);
+  }, [lastMessageKey]);
 
   useEffect(() => {
     const checkApiKey = async () => {
