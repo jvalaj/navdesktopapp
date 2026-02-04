@@ -24,6 +24,7 @@ let restoreBounds = null;
 let restoreOpacity = 1;       // used by setAgentWindowMode
 let captureRestoreOpacity = 1; // used by setCaptureMode (separate to avoid cross-talk)
 let animTimer = null;
+let overlayWindow;
 
 function getStorageDirs() {
   // Per-user, per-app directory (dynamic for whoever is running the app)
@@ -31,6 +32,83 @@ function getStorageDirs() {
   const conversationsDir = path.join(base, "conversations");
   const screenshotsDir = path.join(base, "screenshots");
   return { base, conversationsDir, screenshotsDir };
+}
+
+function overlayHtmlUrl() {
+  const filePath = isDev
+    ? path.resolve(__dirname, "overlay.html")
+    : path.resolve(app.getAppPath(), "electron", "overlay.html");
+  return pathToFileURL(filePath).toString();
+}
+
+function positionOverlayWindow() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  const display = screen.getPrimaryDisplay();
+  // Cover the full display so the dashed border surrounds the whole screen.
+  // Use bounds (not workArea) so it wraps menu bar / dock too.
+  const bounds = display.bounds;
+  overlayWindow.setBounds(
+    { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+    false
+  );
+}
+
+function ensureOverlayWindow() {
+  if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
+
+  overlayWindow = new BrowserWindow({
+    width: 200,
+    height: 200,
+    x: 0,
+    y: 0,
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    focusable: false,
+    fullscreenable: true,
+    minimizable: false,
+    maximizable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: false,
+      backgroundThrottling: false,
+    }
+  });
+
+  // Exclude from macOS screen capture APIs (so it won't show up in agent screenshots).
+  overlayWindow.setContentProtection(true);
+  overlayWindow.setAlwaysOnTop(true, "floating");
+  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  overlayWindow.setIgnoreMouseEvents(true);
+
+  overlayWindow.on("closed", () => {
+    overlayWindow = null;
+  });
+
+  overlayWindow.loadURL(overlayHtmlUrl()).catch((err) => {
+    console.error("Failed to load overlay window:", err);
+  });
+
+  positionOverlayWindow();
+  return overlayWindow;
+}
+
+function showOverlay() {
+  const win = ensureOverlayWindow();
+  if (!win) return;
+  positionOverlayWindow();
+  if (!win.isVisible()) win.showInactive();
+}
+
+function hideOverlay() {
+  if (!overlayWindow || overlayWindow.isDestroyed()) return;
+  overlayWindow.hide();
 }
 
 function resolvePythonPath() {
@@ -181,6 +259,7 @@ function setAgentWindowMode(enabled) {
     mainWindow.setAlwaysOnTop(true, "floating");
     mainWindow.setVisibleOnAllWorkspaces(true);
     mainWindow.setContentProtection(true);
+    showOverlay();
   } else {
     if (restoreBounds) {
       animateTo(restoreBounds);
@@ -190,6 +269,7 @@ function setAgentWindowMode(enabled) {
     mainWindow.setContentProtection(false);
     mainWindow.setOpacity(restoreOpacity || 1);
     mainWindow.setIgnoreMouseEvents(false);
+    hideOverlay();
   }
 }
 
@@ -239,8 +319,21 @@ function resolveScreenshotPath(filePath) {
 }
 
 app.whenReady().then(async () => {
+  // Keep overlay pinned if display metrics change (screen is only usable after ready).
+  screen.on("display-metrics-changed", () => positionOverlayWindow());
+  screen.on("display-added", () => positionOverlayWindow());
+  screen.on("display-removed", () => positionOverlayWindow());
+
   protocol.handle("navai", (request) => {
-    const urlPart = request.url.slice("navai://".length).replace(/^\/+/, "");
+    // After "navai://", there may be 0-2 slashes before the actual path
+    // We need to preserve a leading slash for absolute paths
+    let urlPart = request.url.slice("navai://".length);
+    // Strip extra slashes from protocol formatting, but keep one if it's an absolute path
+    if (urlPart.startsWith("//")) {
+      urlPart = urlPart.slice(1); // Remove one slash, leave one for absolute path
+    } else if (urlPart.startsWith("/") && !urlPart.startsWith("//")) {
+      // Single slash - keep it for absolute path
+    }
     const decoded = decodeURIComponent(urlPart);
     const full = resolveScreenshotPath(decoded);
     if (!full) return new Response("Not found", { status: 404 });

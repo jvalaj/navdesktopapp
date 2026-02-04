@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import ActivityTrace from "./components/ActivityTrace.jsx";
 import SettingsModal from "./components/SettingsModal.jsx";
 import ApiKeyModal from "./components/ApiKeyModal.jsx";
@@ -41,11 +41,27 @@ const DEFAULT_CONVO = {
   messages: []
 };
 
+const sanitizeTitle = (title) => {
+  if (title == null) return "New conversation";
+  let s = String(title).trim();
+  // Strip surrounding quotes.
+  s = s.replace(/^["'“”]+|["'“”]+$/g, "").trim();
+  // Strip markdown heading/bullet prefixes (common from LLMs).
+  s = s.replace(/^\s*#{1,6}\s*/, "");
+  s = s.replace(/^\s*[-*]\s+/, "");
+  // Normalize whitespace.
+  s = s.replace(/\s+/g, " ").trim();
+  return s || "New conversation";
+};
+
 export default function App() {
   const [conversations, setConversations] = useState(() => {
     try {
       const stored = localStorage.getItem("navai_conversations");
-      return stored ? JSON.parse(stored) : [DEFAULT_CONVO];
+      const parsed = stored ? JSON.parse(stored) : [DEFAULT_CONVO];
+      const list = Array.isArray(parsed) && parsed.length ? parsed : [DEFAULT_CONVO];
+      // Clean up any previously-saved titles (e.g. starting with '#').
+      return list.map((c) => ({ ...c, title: sanitizeTitle(c?.title) }));
     } catch {
       return [DEFAULT_CONVO];
     }
@@ -80,9 +96,29 @@ export default function App() {
     [conversations, activeId]
   );
 
+  const threadEndRef = useRef(null);
+
   useEffect(() => {
     localStorage.setItem("navai_conversations", JSON.stringify(conversations));
   }, [conversations]);
+
+  const lastMessageKey = useMemo(() => {
+    const msgs = activeConversation?.messages;
+    if (!Array.isArray(msgs) || !msgs.length) return "";
+    const last = msgs[msgs.length - 1];
+    const id = last?.id ?? "last";
+    const contentLen = typeof last?.content === "string" ? last.content.length : String(last?.content ?? "").length;
+    return `${activeConversation?.id ?? ""}:${id}:${contentLen}`;
+  }, [activeConversation?.id, activeConversation?.messages]);
+
+  // Keep scrolling as new words stream in from message deltas.
+  useEffect(() => {
+    if (!running) return;
+    // Wait for DOM paint of the updated bubble before scrolling.
+    requestAnimationFrame(() => {
+      threadEndRef.current?.scrollIntoView({ block: "end", behavior: "auto" });
+    });
+  }, [running, lastMessageKey]);
 
   useEffect(() => {
     const checkApiKey = async () => {
@@ -110,11 +146,11 @@ export default function App() {
     const connect = () => {
       if (canceled) return;
       setWsStatus("connecting");
-      setWsError("");
       socket = new WebSocket("ws://127.0.0.1:8765");
       socket.onopen = () => {
         setWs(socket);
         setWsStatus("connected");
+        setWsError("");
       };
       socket.onclose = () => {
         setWs(null);
@@ -127,9 +163,7 @@ export default function App() {
         setWs(null);
         if (!canceled) {
           setWsStatus("error");
-          setWsError(
-            "Agent server not reachable. If you just started the app, wait a moment—Python may still be starting. If it keeps failing, check the terminal where you ran the app for Python errors (e.g. missing websockets, wrong path to agent_server.py)."
-          );
+          setWsError((prev) => prev || "Agent server not reachable. If you just started the app, wait a moment—Python may still be starting. If it keeps failing, check the terminal where you ran the app for Python errors (e.g. missing websockets, wrong path to agent_server.py).");
         }
       };
       socket.onmessage = (event) => {
@@ -170,7 +204,7 @@ export default function App() {
       return prev.map((convo) => {
         if (payload.type === "title") {
           if (convo.id !== payload.conversationId) return convo;
-          return { ...convo, title: payload.title, updatedAt: nowLabel() };
+          return { ...convo, title: sanitizeTitle(payload.title), updatedAt: nowLabel() };
         }
         if (convo.id !== targetConvoId) return convo;
         const messages = [...convo.messages];
@@ -261,15 +295,16 @@ export default function App() {
   const titleFromPrompt = (text) => {
     const words = text.trim().split(/\s+/).slice(0, 4);
     if (!words.length) return "New conversation";
-    const title = words.join(" ");
-    return title.length > 40 ? `${title.slice(0, 37)}...` : `${title}...`;
+    const base = sanitizeTitle(words.join(" "));
+    const t = base.length > 40 ? `${base.slice(0, 37)}...` : base;
+    return t.endsWith("...") ? t : `${t}...`;
   };
 
   const sendPrompt = () => {
     if (!composer.trim() || !activeConversation) return;
     if (!ws) {
       setWsStatus("error");
-      setWsError("Agent server not running. Please check Python setup.");
+      setWsError((prev) => prev || "Agent server not running. Please check Python setup.");
       return;
     }
     if (activeConversation.title === "New conversation") {
@@ -547,6 +582,7 @@ export default function App() {
                 </div>
               </div>
             ))}
+            <div ref={threadEndRef} style={{ height: 1 }} />
           </div>
 
           <div className="composer">

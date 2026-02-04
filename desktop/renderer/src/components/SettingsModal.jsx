@@ -51,16 +51,6 @@ export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus,
             </select>
           </label>
           <label>
-            Screenshot Frequency (seconds)
-            <input
-              type="number"
-              min={1}
-              max={10}
-              value={form.screenshotFrequency}
-              onChange={(e) => update("screenshotFrequency", Number(e.target.value))}
-            />
-          </label>
-          <label>
             Save Screenshots
             <select value={form.saveScreenshots ? "on" : "off"} onChange={(e) => update("saveScreenshots", e.target.value === "on")}>
               <option value="on">On</option>

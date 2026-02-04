@@ -51,11 +51,14 @@ def click_at(
         click_at(100, 200, "right", 1)  # Right click
     """
     try:
-        # Validate coordinates
-        if not (0 <= x <= SCREEN_WIDTH):
-            return {"success": False, "error": f"X coordinate {x} out of bounds (0-{SCREEN_WIDTH})"}
-        if not (0 <= y <= SCREEN_HEIGHT):
-            return {"success": False, "error": f"Y coordinate {y} out of bounds (0-{SCREEN_HEIGHT})"}
+        # Normalize + clamp coordinates.
+        # pyautogui expects x in [0, width-1], y in [0, height-1].
+        max_x = max(0, int(SCREEN_WIDTH) - 1)
+        max_y = max(0, int(SCREEN_HEIGHT) - 1)
+        x = int(round(x))
+        y = int(round(y))
+        x = max(0, min(x, max_x))
+        y = max(0, min(y, max_y))
 
         # Validate click type
         valid_click_types = ["left", "right", "middle"]

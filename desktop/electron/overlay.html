@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>NavAI Overlay</title>
+    <style>
+      html, body {
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+      }
+
+      /* Transparent window; only show border */
+      .root {
+        width: 100%;
+        height: 100%;
+        background: transparent;
+        pointer-events: none;
+      }
+
+      svg {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .border {
+        fill: none;
+        stroke: rgba(108, 207, 246, 0.95); /* light blue */
+        stroke-width: 4;
+        stroke-dasharray: 10 10;
+        stroke-linecap: square;
+        vector-effect: non-scaling-stroke;
+        filter: drop-shadow(0 0 8px rgba(108, 207, 246, 0.22));
+        animation: dash 0.9s linear infinite;
+      }
+
+      @keyframes dash {
+        to { stroke-dashoffset: -40; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="root">
+      <svg viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true">
+        <!-- Slight inset so the stroke isn't clipped -->
+        <rect class="border" x="2" y="2" width="96" height="96" rx="0" ry="0"></rect>
+      </svg>
+    </div>
+  </body>
+</html>

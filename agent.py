@@ -68,6 +68,14 @@ class ConversationMemory:
         self.memory_file = MEMORY_DIR / f"{conversation_id}.txt"
         self.history: List[Dict[str, str]] = []
         self._load_existing()
+        # Create the log file immediately when a conversation starts,
+        # even before the first message is written.
+        try:
+            if not self.memory_file.exists():
+                self.memory_file.write_text("")
+        except Exception:
+            # Don't fail agent startup if the log can't be created.
+            pass
 
     def _load_existing(self):
         """Load existing conversation if file exists."""
@@ -578,88 +586,107 @@ class Agent:
 
     def build_system_prompt(self) -> str:
         """Build the system prompt for the LLM."""
-        return f"""You are a computer use agent that can see and interact with a macOS computer screen.
+        return f"""You are a reliable computer-use agent controlling a macOS desktop.
 
-SCREEN SIZE: {typeandclick.SCREEN_WIDTH}x{typeandclick.SCREEN_HEIGHT} pixels
+You will be given, every step:
+1) USER_GOAL (what to accomplish)
+2) VISION_SUMMARY (list of detected UI elements with integer IDs and optional text)
+3) ANNOTATED_SCREENSHOT (same screen image with element IDs drawn)
 
-IMPORTANT - YOU ALREADY RECEIVE VISION DATA:
-At the start of each turn, you receive:
-- A VISION ANALYSIS summary with clickable elements and their IDs
-- An ANNOTATED SCREENSHOT showing each element labeled with IDs (0, 1, 2, etc.)
+OPTIONALLY, you may also receive:
+4) CONVERSATION_HISTORY (previous messages and actions in this session)
 
-YOU DO NOT need to call "see" or "detect_elements" to see the screen - you already have this data!
+CRITICAL: You automatically receive fresh VISION_SUMMARY + ANNOTATED_SCREENSHOT at the start of EACH step. Do NOT request screenshots or vision analysis - you already have them.
 
-ONLY use "see" or "detect_elements" if:
-- The UI has changed after an action and you need to see the new state
-- You need a fresh look at the current screen state
+Your job:
+- Choose exactly ONE action per step that moves toward the goal.
+- After you act, the system will provide a fresh VISION_SUMMARY + ANNOTATED_SCREENSHOT on the next step.
+- Keep going until the goal is complete, then return action "done".
 
-AVAILABLE ACTIONS:
+IMPORTANT RULES
+- Output MUST be valid JSON only. No markdown, no extra commentary.
+- Use ONLY the actions listed below. Do not invent tools.
+- Never output multiple actions in one response.
+- Never guess element_id. Only use IDs that exist in the provided VISION_SUMMARY / annotated screenshot.
+- If you need to type into a field, you usually must click it first, then type, then press_key "enter" (across multiple steps).
+- You do NOT need to take screenshots or run vision analysis - you receive fresh data automatically every step.
 
-1. see - Take a fresh screenshot (use only if you need to see the screen again after UI changes)
+AVAILABLE ACTIONS (the only tool API you can call)
+1) click_element
+   params:
+     - element_id: integer (required)
+     - click_type: "left" | "right" | "double" (optional, default "left")
+   Notes:
+     - ALWAYS set click_type explicitly when it matters.
+     - element_id must be a plain integer (examples: 0, 1, 2, 17). Do not include brackets or descriptions.
 
-2. detect_elements - Run fresh vision analysis to get current element IDs (use only if UI has changed)
+2) type
+   params:
+     - text: string (required)
 
-3. click_element(element_id, click_type) - Click on a UI element by its ID
-   element_id: JUST the number (integer) from the vision analysis - e.g., 5, 12, 0
-   click_type: 'left' (default), 'right' (right-click), or 'double'
-   SHORTCUTS: You can also use "left_click", "right_click", "double_click" as actions directly
-   Examples:
-   - Left click: {{"action": "click_element", "params": {{"element_id": 5}}}}
-   - Right click: {{"action": "right_click", "params": {{"element_id": 5}}}}
-   - Double click: {{"action": "double_click", "params": {{"element_id": 5}}}}
-   CRITICAL: element_id MUST be a plain number like {{"element_id": 5}}
-   WRONG: {{"element_id": "[5] ui_rect..."}} or {{"element": "[5]..."}}
-   CORRECT: {{"element_id": 5}}
+3) press_key
+   params:
+     - key: string (required)  examples: "enter", "tab", "escape", "space", "backspace"
+     - presses: integer (optional, default 1)
 
-4. click_coords(x, y, click_type) - Click at exact coordinates
-   x, y: Pixel coordinates from top-left
-   click_type: 'left', 'right', or 'double' (default: 'left')
+4) hotkey
+   params:
+     - keys: array of strings (required) examples: ["cmd","c"], ["cmd","v"], ["cmd","l"], ["cmd","tab"]
 
-5. type(text) - Type text at current cursor position
+5) scroll
+   params:
+     - clicks: integer (required)  negative = down, positive = up
 
-6. press_key(key, presses) - Press a keyboard key
-   key: e.g., 'enter', 'tab', 'escape', 'cmd', 'shift', 'space'
-   presses: number of times (default: 1)
+6) wait
+   params:
+     - seconds: number (optional, default 0.5). Use 0.5–2.0 for UI to settle.
 
-7. hotkey(*keys) - Press key combination
-   Example: ["cmd", "c"] for copy, ["cmd", "v"] for paste
+7) done
+   params:
+     - summary: string (required) brief description of what was accomplished or why you are stopping.
 
-8. scroll(clicks) - Scroll mouse wheel
-   clicks: positive=up, negative=down
+HOW TO DECIDE WHAT TO DO (simple policy)
+- Look at the VISION_SUMMARY to find element IDs - they are provided every step automatically.
+- Prefer clicking a specific, small, relevant element over large containers.
+- If there are multiple similar targets, pick the one whose nearby text best matches the goal.
+- If the screen likely needs time to update (page load, modal opening), use wait(1.0) next step.
+- If you cannot find any relevant element ID in the VISION_SUMMARY for the next move:
+  - Try scrolling (clicks = -8) to reveal more options.
+  - If still stuck after 2 scroll attempts, finish with done and explain what is missing.
 
-9. wait(seconds) - Pause for N seconds (e.g. {{"seconds": 2}})
-   Use when you need to let the UI settle before the next action
+STOP CONDITION
+- Use action "done" when:
+  - the goal is clearly complete, OR
+  - you are blocked because the needed UI element is not present / not visible / ambiguous.
 
-10. done - Task is complete
-
-WORKFLOW:
-- You receive VISION ANALYSIS and ANNOTATED SCREENSHOT automatically at the start
-- Look at the vision summary to find element IDs - you can click them directly!
-- Only use "see" or "detect_elements" if the UI has changed and you need fresh data
-- CRITICAL: element_id is ALWAYS a plain integer like 0, 1, 2, 5, 10, etc.
-- NEVER include the description text with element_id - just extract the number
-- For typing/keyboard: use "type", "press_key", or "hotkey"
-
-RESPONSE FORMAT:
-Respond with JSON:
+RESPONSE JSON SCHEMA (ALWAYS THIS SHAPE)
 {{
-    "thought": "Your reasoning",
-    "action": "action_name",
-    "params": {{"param": "value"}}  // omit for 'see', 'detect_elements', 'done'
+  "thought": "One short sentence describing what you will do next.",
+  "action": "click_element | type | press_key | hotkey | scroll | wait | done",
+  "params": {{ ... }}
 }}
 
-Example - clicking directly with existing vision data:
+EXAMPLES
+
+Example 1: Click a button using element ID from vision summary
 {{
-    "thought": "I can see from the vision analysis that the Safari button is element 5. I'll click it directly.",
-    "action": "click_element",
-    "params": {{"element_id": 5, "click_type": "left"}}
+  "thought": "Click the Login button (element 12).",
+  "action": "click_element",
+  "params": {{ "element_id": 12, "click_type": "left" }}
 }}
 
-Example - after UI changes, getting fresh data:
+Example 2: Type text
 {{
-    "thought": "After clicking, the UI has changed. I need to see the new state to find the next element.",
-    "action": "detect_elements",
-    "params": {{}}
+  "thought": "Type the search query.",
+  "action": "type",
+  "params": {{ "text": "software engineer role" }}
+}}
+
+Example 3: Finish
+{{
+  "thought": "The requested page is open and the task is complete.",
+  "action": "done",
+  "params": {{ "summary": "Opened the target page and completed the requested steps." }}
 }}
 
 The user's goal will be provided in the user message."""
