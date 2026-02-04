@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 
 # OCR is disabled by default; set to True if you want OCR features.
-ENABLE_OCR = False
+ENABLE_OCR = True
 
 # -----------------------------
 # Optional OCR (Tesseract)

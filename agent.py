@@ -139,6 +139,28 @@ class Agent:
         self.thinking_enabled = thinking_enabled
         self.step_count = 0
         self.last_vision_data = None  # Stores last vision analysis results
+        # State management for smarter decisions
+        self.clicked_elements: List[int] = []  # Track clicked element IDs
+        self.action_history: List[Dict[str, Any]] = []  # Track recent actions
+        self.last_screenshot_hash: Optional[str] = None  # Detect UI changes
+
+    def _compute_screenshot_hash(self, screenshot_path: str) -> str:
+        """Compute a simple hash of screenshot to detect UI changes."""
+        import hashlib
+        img = cv2.imread(screenshot_path, cv2.IMREAD_GRAYSCALE)
+        # Resize to small size for fast hashing
+        small = cv2.resize(img, (100, 100))
+        return hashlib.md5(small.tobytes()).hexdigest()
+
+    def _has_ui_changed(self, new_screenshot_path: str) -> bool:
+        """Check if UI has changed since last screenshot."""
+        new_hash = self._compute_screenshot_hash(new_screenshot_path)
+        if self.last_screenshot_hash is None:
+            self.last_screenshot_hash = new_hash
+            return True
+        changed = new_hash != self.last_screenshot_hash
+        self.last_screenshot_hash = new_hash
+        return changed
 
     def take_screenshot(self) -> str:
         """Take a regular screenshot and return the path."""
@@ -323,6 +345,14 @@ class Agent:
         # Run vision analysis
         boxes = vision.parse_ui_everything(img_bgr)
 
+        # Try OCR if enabled to get text for each box
+        if vision.ENABLE_OCR:
+            ocr_words = vision.try_ocr_words(img_bgr)
+            if ocr_words:
+                vision.assign_words_to_boxes(boxes, ocr_words)
+                # Recompute click points using OCR text centroids
+                vision.add_click_points(boxes, shot_width, shot_height)
+
         # Create annotated image
         annotated_img = vision.draw(img_bgr, boxes)
         annotated_path = SCREENSHOT_DIR / f"annotated_{timestamp}.png"
@@ -422,6 +452,13 @@ class Agent:
                 "error": "Missing element_id or index parameter"
             }
 
+        # Check if we've already clicked this element recently (avoid loops)
+        if element_id in self.clicked_elements[-5:]:  # Check last 5 clicks
+            return {
+                "success": False,
+                "error": f"Element ID {element_id} was already clicked recently. Try a different element or action."
+            }
+
         # Validate element_id - accept numbers or extract number from strings
         if isinstance(element_id, str):
             # Try to extract a number from various formats: "[5]", "element 5", "id:5", etc.
@@ -500,9 +537,18 @@ class Agent:
             }
 
         if result.get("success"):
+            # Track clicked element to avoid repetition
+            self.clicked_elements.append(element_id)
+            # Keep only last 20 clicks
+            if len(self.clicked_elements) > 20:
+                self.clicked_elements = self.clicked_elements[-20:]
+
             result["message"] = f"Clicked element [{element_id}] ({box_type}) - original coords: ({cx}, {cy}) -> clicked at: ({scaled_x}, {scaled_y})"
             if text:
                 result["message"] += f" '{text}'"
+        else:
+            # Error recovery: provide fallback hint
+            result["recovery_hint"] = f"If element {element_id} failed, try clicking a nearby element or using coordinates."
 
         return result
 
@@ -584,8 +630,93 @@ class Agent:
             "message": f"Analyzed screen, found {len(vision_data['boxes'])} elements. See annotated image for IDs."
         }
 
+    def _record_action(self, action: str, params: Dict, result: Dict):
+        """Record an action in history for stuck detection."""
+        self.action_history.append({
+            "step": self.step_count,
+            "action": action,
+            "params": params,
+            "success": result.get("success", False)
+        })
+        # Keep only last 10 actions
+        if len(self.action_history) > 10:
+            self.action_history = self.action_history[-10:]
+
+    def _check_task_completion(self, user_goal: str, current_screenshot: str) -> tuple[bool, str]:
+        """
+        Check if the task appears to be completed by analyzing the goal and screenshot.
+        Returns (is_complete, reason)
+        """
+        import re
+        from PIL import Image
+
+        goal_lower = user_goal.lower()
+
+        # For "open" goals, we can't easily verify without more context
+        if "open" in goal_lower and len(self.action_history) > 0:
+            last_action = self.action_history[-1]
+            if last_action["success"] and last_action["action"] in ("click_element", "click_coords"):
+                return True, "Target appears to be opened"
+
+        # Check for error messages on screen that might indicate completion
+        img = Image.open(current_screenshot)
+        # This is a simple heuristic - could be enhanced with actual OCR
+
+        return False, ""
+
+    def _is_stuck(self) -> tuple[bool, str]:
+        """Detect if agent is stuck in a loop."""
+        if len(self.action_history) < 3:
+            return False, ""
+
+        # Check for repeated same action on same element
+        last_5 = self.action_history[-5:]
+        failed_clicks = [a for a in last_5 if a["action"] == "click_element" and not a["success"]]
+        if len(failed_clicks) >= 2:
+            return True, f"Repeated failed clicks on element"
+
+        # Check if clicking same element multiple times
+        clicked_ids = [a["params"].get("element_id") for a in last_5 if a["action"] == "click_element" and a["success"]]
+        if len(clicked_ids) >= 3 and len(set(clicked_ids)) == 1:
+            return True, f"Clicked same element {clicked_ids[0]} three times without progress"
+
+        # Check for repeated failures
+        recent_failures = [a for a in last_5 if not a["success"]]
+        if len(recent_failures) >= 3:
+            return True, f"Multiple recent failures ({len(recent_failures)})"
+
+        return False, ""
+
+    def _get_action_memory_summary(self) -> str:
+        """Get a summary of recent actions for the LLM context."""
+        if not self.action_history:
+            return "No previous actions yet."
+
+        recent = self.action_history[-5:]  # Last 5 actions
+        summary = []
+        for a in recent:
+            status = "✓" if a["success"] else "✗"
+            action_str = a["action"]
+            if a["action"] == "click_element":
+                elem_id = a["params"].get("element_id", "?")
+                action_str = f"click element [{elem_id}]"
+            elif a["action"] == "type":
+                text_preview = a["params"].get("text", "")[:30]
+                action_str = f"type '{text_preview}'"
+            elif a["action"] == "press_key":
+                action_str = f"press {a['params'].get('key', '')}"
+            elif a["action"] == "scroll":
+                action_str = f"scroll {a['params'].get('clicks', '')}"
+            summary.append(f"{status} {action_str}")
+        return " | ".join(summary)
+
     def build_system_prompt(self) -> str:
         """Build the system prompt for the LLM."""
+        action_memory = self._get_action_memory_summary()
+        clicked_hint = ""
+        if self.clicked_elements:
+            clicked_hint = f"\n\nNOTE: You have already clicked elements: {list(set(self.clicked_elements[-10:]))}. Avoid clicking the same element repeatedly - try something different."
+
         return f"""You are a reliable computer-use agent controlling a macOS desktop.
 
 You will be given, every step:
@@ -650,6 +781,7 @@ HOW TO DECIDE WHAT TO DO (simple policy)
 - Prefer clicking a specific, small, relevant element over large containers.
 - If there are multiple similar targets, pick the one whose nearby text best matches the goal.
 - If the screen likely needs time to update (page load, modal opening), use wait(1.0) next step.
+- AVOID CLICKING THE SAME ELEMENT MULTIPLE TIMES - if a click doesn't work, try a different approach.
 - If you cannot find any relevant element ID in the VISION_SUMMARY for the next move:
   - Try scrolling (clicks = -8) to reveal more options.
   - If still stuck after 2 scroll attempts, finish with done and explain what is missing.
@@ -861,8 +993,15 @@ The user's goal will be provided in the user message."""
                 "text": f"CONVERSATION HISTORY:\n{memory_summary}\n"
             })
 
+        # Add recent action memory for better decisions
+        action_memory = self._get_action_memory_summary()
+        clicked_hint = ""
+        if self.clicked_elements:
+            clicked_hint = f"\nAlready clicked elements: {list(set(self.clicked_elements[-10:]))}. Try different elements."
+
         # Build current state text
         state_text = f"USER GOAL: {user_goal}\n"
+        state_text += f"\nRECENT ACTIONS: {action_memory}{clicked_hint}\n"
         if vision_summary:
             state_text += f"\nVISION ANALYSIS:\n{vision_summary}\n"
         state_text += "\nWhat should I do next? Respond with JSON containing 'thought', 'action', and 'params'."
@@ -1002,6 +1141,9 @@ The user's goal will be provided in the user message."""
             result = self.execute_action(action, params)
             normalized_action = result.get("_normalized_action", action) if isinstance(result, dict) else action
 
+            # Record action for stuck detection
+            self._record_action(normalized_action, params, result)
+
             # Handle result
             if result.get("done"):
                 print("\n✓ Task complete!")
@@ -1017,9 +1159,24 @@ The user's goal will be provided in the user message."""
                     {"step": step, "action": action, "result": "success"}
                 )
 
-                # Clear vision data after any action that likely changes the UI
-                if normalized_action in ("see", "click_element", "click_coords", "type", "press_key", "hotkey", "scroll"):
+                # Smart vision data clearing: only clear if UI likely changed
+                # Take a quick screenshot to check if UI actually changed
+                test_screenshot = self.take_screenshot()
+                ui_changed = self._has_ui_changed(test_screenshot)
+
+                # Clear vision data only for actions that change UI AND UI actually changed
+                if normalized_action in ("click_element", "click_coords"):
+                    # Click actions usually change UI - check with screenshot comparison
+                    if ui_changed:
+                        self.last_vision_data = None
+                        print("  (UI changed - refreshing vision data)")
+                    else:
+                        print("  (UI unchanged - keeping vision data)")
+                elif normalized_action in ("type", "press_key", "hotkey", "scroll"):
+                    # These actions might change UI - clear to be safe
                     self.last_vision_data = None
+                    print("  (Action may change UI - refreshing vision data)")
+                # For 'wait' and 'see', keep vision data
             else:
                 error = result.get("error", "Unknown error")
                 print(f"✗ Error: {error}")
@@ -1028,6 +1185,22 @@ The user's goal will be provided in the user message."""
                     f"Failed {action}: {error}",
                     {"step": step, "action": action, "result": "error"}
                 )
+
+            # Check if agent is stuck
+            is_stuck, stuck_reason = self._is_stuck()
+            if is_stuck:
+                print(f"\n⚠ Agent appears stuck: {stuck_reason}")
+                print("Trying alternative approach...")
+                # Force vision refresh to get fresh data
+                self.last_vision_data = None
+
+            # Check if task appears complete
+            if self.last_vision_data and self.last_vision_data.get("screenshot"):
+                is_complete, complete_reason = self._check_task_completion(user_goal, self.last_vision_data["screenshot"])
+                if is_complete:
+                    print(f"\n✓ Task appears complete: {complete_reason}")
+                    self.memory.add("assistant", f"Task completed: {complete_reason}", {"step": step, "status": "done"})
+                    break
 
             # Wait for UI to update
             time.sleep(delay_after_action)
