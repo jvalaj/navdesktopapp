@@ -1,0 +1,581 @@
+import React, { useEffect, useMemo, useState, useRef } from "react";
+import ActivityTrace from "./components/ActivityTrace.jsx";
+import SettingsModal from "./components/SettingsModal.jsx";
+import ApiKeyModal from "./components/ApiKeyModal.jsx";
+import ImageViewer from "./components/ImageViewer.jsx";
+import EntranceScreen from "./components/EntranceScreen.jsx";
+import { nowLabel, uid } from "./components/utils.js";
+import logoUrl from "./assets/logo.png";
+
+class AppErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
+  static getDerivedStateFromError(error) {
+    return { hasError: true, error };
+  }
+  componentDidCatch(error, info) {
+    console.error("App error:", error, info);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="app" style={{ padding: 24, display: "flex", alignItems: "center", justifyContent: "center", minHeight: "100vh", flexDirection: "column", gap: 12 }}>
+          <p style={{ color: "#666" }}>Something went wrong while showing the response.</p>
+          <button
+            className="btn-primary"
+            onClick={() => this.setState({ hasError: false, error: null })}
+          >
+            Try again
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const DEFAULT_CONVO = {
+  id: uid(),
+  title: "New conversation",
+  updatedAt: nowLabel(),
+  messages: []
+};
+
+export default function App() {
+  const [conversations, setConversations] = useState(() => {
+    try {
+      const stored = localStorage.getItem("navai_conversations");
+      return stored ? JSON.parse(stored) : [DEFAULT_CONVO];
+    } catch {
+      return [DEFAULT_CONVO];
+    }
+  });
+  const [activeId, setActiveId] = useState(conversations[0]?.id);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(300);
+  const [composer, setComposer] = useState("");
+  const [running, setRunning] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [viewer, setViewer] = useState(null);
+  const [apiKeyStatus, setApiKeyStatus] = useState({ connected: false });
+  const [settings, setSettings] = useState({
+    model: "claude-sonnet-4-5-20250929",
+    screenshotFrequency: 2,
+    saveScreenshots: true,
+    allowSendScreenshots: true,
+    dryRun: false
+  });
+  const [search, setSearch] = useState("");
+  const captureModeToggleRef = useRef(0); // throttle rapid capture mode toggles
+  const [ws, setWs] = useState(null);
+  const [wsStatus, setWsStatus] = useState("connecting");
+  const [wsError, setWsError] = useState("");
+  const [showEntrance, setShowEntrance] = useState(true);
+
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === activeId),
+    [conversations, activeId]
+  );
+
+  useEffect(() => {
+    localStorage.setItem("navai_conversations", JSON.stringify(conversations));
+  }, [conversations]);
+
+  useEffect(() => {
+    window.navai?.apiKeyStatus().then(setApiKeyStatus);
+    window.navai?.settingsGet().then((s) => s && setSettings((prev) => ({ ...prev, ...s })));
+    window.navai?.setCaptureMode?.(false);
+  }, []);
+
+  useEffect(() => {
+    let socket;
+    let retryTimer;
+    let initialDelayTimer;
+    let canceled = false;
+
+    const connect = () => {
+      if (canceled) return;
+      setWsStatus("connecting");
+      setWsError("");
+      socket = new WebSocket("ws://127.0.0.1:8765");
+      socket.onopen = () => {
+        setWs(socket);
+        setWsStatus("connected");
+      };
+      socket.onclose = () => {
+        setWs(null);
+        if (!canceled) {
+          setWsStatus("disconnected");
+          retryTimer = setTimeout(connect, 1500);
+        }
+      };
+      socket.onerror = () => {
+        setWs(null);
+        if (!canceled) {
+          setWsStatus("error");
+          setWsError(
+            "Agent server not reachable. If you just started the app, wait a moment—Python may still be starting. If it keeps failing, check the terminal where you ran the app for Python errors (e.g. missing websockets, wrong path to agent_server.py)."
+          );
+        }
+      };
+      socket.onmessage = (event) => {
+        try {
+          const payload = JSON.parse(event.data);
+          handleAgentEvent(payload);
+        } catch (err) {
+          console.error("Agent message parse error:", err);
+          // Don't crash the app on bad WebSocket data
+        }
+      };
+    };
+
+    // Give the Python server time to start (Electron spawns it when the app loads).
+    initialDelayTimer = setTimeout(connect, 1200);
+
+    return () => {
+      canceled = true;
+      clearTimeout(retryTimer);
+      clearTimeout(initialDelayTimer);
+      socket?.close();
+    };
+  }, []);
+
+  const handleAgentEvent = (payload) => {
+    if (!payload || typeof payload.type !== "string") return;
+    if (payload.type === "status") {
+      setRunning(payload.state === "running");
+      window.navai?.setAgentWindowMode?.(payload.state === "running");
+      if (payload.state !== "running") {
+        window.navai?.setCaptureMode?.(false);
+      }
+      return;
+    }
+
+    if (!activeConversation) return;
+
+    const targetConvoId = payload.conversationId ?? activeId;
+
+    setConversations((prev) => {
+      return prev.map((convo) => {
+        if (payload.type === "title") {
+          if (convo.id !== payload.conversationId) return convo;
+          return { ...convo, title: payload.title, updatedAt: nowLabel() };
+        }
+        if (convo.id !== targetConvoId) return convo;
+        const messages = [...convo.messages];
+
+        if (payload.type === "message_delta") {
+          const role = payload.role === "assistant" || payload.role === "user" ? payload.role : "assistant";
+          const messageId = payload.messageId ?? uid();
+          const delta = typeof payload.delta === "string" ? payload.delta : String(payload.delta ?? "");
+          const last = messages[messages.length - 1];
+          if (!last || last.role !== role || last.id !== messageId) {
+            messages.push({
+              id: messageId,
+              role,
+              content: delta,
+              timestamp: nowLabel(),
+              activity: { steps: [] }
+            });
+          } else {
+            messages[messages.length - 1] = {
+              ...last,
+              content: (last.content ?? "") + delta
+            };
+          }
+        }
+
+        if (payload.type === "step") {
+          const last = messages[messages.length - 1];
+          if (last) {
+            const stepId = payload.stepId ?? uid();
+            const steps = [...(last.activity?.steps ?? []), {
+              id: stepId,
+              title: payload.title ?? "",
+              caption: payload.caption ?? "",
+              timestamp: payload.timestamp ?? nowLabel(),
+              screenshots: []
+            }];
+            messages[messages.length - 1] = {
+              ...last,
+              activity: { ...last.activity, steps }
+            };
+            if (payload.title && payload.title.toLowerCase().includes("screenshot") && running) {
+              const now = Date.now();
+              const minInterval = 1500; // prevent rapid hide/show glitching
+              if (now - captureModeToggleRef.current > minInterval) {
+                captureModeToggleRef.current = now;
+                window.navai?.setCaptureMode?.(true);
+                setTimeout(() => {
+                  window.navai?.setCaptureMode?.(false);
+                  captureModeToggleRef.current = Date.now();
+                }, 800);
+              }
+            }
+          }
+        }
+
+        if (payload.type === "screenshot") {
+          const last = messages[messages.length - 1];
+          if (last?.activity?.steps?.length) {
+            const stepIndex = last.activity.steps.findIndex((s) => s.id === payload.stepId);
+            const steps = [...last.activity.steps];
+            const step = stepIndex >= 0 ? steps[stepIndex] : steps[steps.length - 1];
+            if (step) {
+              const idx = stepIndex >= 0 ? stepIndex : steps.length - 1;
+              steps[idx] = {
+                ...step,
+                screenshots: [...(step.screenshots ?? []), {
+                  path: payload.path,
+                  caption: payload.caption,
+                  timestamp: payload.timestamp
+                }]
+              };
+              messages[messages.length - 1] = {
+                ...last,
+                activity: { ...last.activity, steps }
+              };
+            }
+          }
+          window.navai?.setCaptureMode?.(false);
+        }
+
+        if (payload.type === "tool") {
+          const last = messages[messages.length - 1];
+          if (last?.activity?.steps?.length) {
+            const steps = [...last.activity.steps];
+            const step = steps[steps.length - 1];
+            if (step) {
+              steps[steps.length - 1] = { ...step, caption: payload.caption ?? step.caption };
+              messages[messages.length - 1] = {
+                ...last,
+                activity: { ...last.activity, steps }
+              };
+            }
+          }
+        }
+
+        return { ...convo, messages, updatedAt: nowLabel() };
+      });
+    });
+  };
+
+  const titleFromPrompt = (text) => {
+    const words = text.trim().split(/\s+/).slice(0, 4);
+    if (!words.length) return "New conversation";
+    const title = words.join(" ");
+    return title.length > 40 ? `${title.slice(0, 37)}...` : `${title}...`;
+  };
+
+  const sendPrompt = () => {
+    if (!composer.trim() || !activeConversation) return;
+    if (!ws) {
+      setWsStatus("error");
+      setWsError("Agent server not running. Please check Python setup.");
+      return;
+    }
+    if (activeConversation.title === "New conversation") {
+      const nextTitle = titleFromPrompt(composer);
+      setConversations((prev) =>
+        prev.map((c) =>
+          c.id === activeConversation.id ? { ...c, title: nextTitle, updatedAt: nowLabel() } : c
+        )
+      );
+    }
+    const messageId = uid();
+    const newUserMsg = {
+      id: messageId,
+      role: "user",
+      content: composer.trim(),
+      timestamp: nowLabel()
+    };
+
+    setConversations((prev) =>
+      prev.map((c) =>
+        c.id === activeConversation.id
+          ? { ...c, messages: [...c.messages, newUserMsg], updatedAt: nowLabel() }
+          : c
+      )
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: "run",
+        conversationId: activeConversation.id,
+        prompt: composer.trim(),
+        settings,
+        requestTitle: activeConversation.title === "New conversation"
+      })
+    );
+
+    setComposer("");
+  };
+
+  const stopAgent = () => {
+    if (!ws || !activeConversation) return;
+    ws.send(
+      JSON.stringify({
+        type: "stop",
+        conversationId: activeConversation.id
+      })
+    );
+  };
+
+  const createConversation = () => {
+    const next = {
+      id: uid(),
+      title: "New conversation",
+      updatedAt: nowLabel(),
+      messages: []
+    };
+    setConversations((prev) => [next, ...prev]);
+    setActiveId(next.id);
+  };
+
+  const deleteConversation = (id) => {
+    setConversations((prev) => {
+      const remaining = prev.filter((c) => c.id !== id);
+      if (!remaining.length) {
+        const next = { ...DEFAULT_CONVO, id: uid(), updatedAt: nowLabel() };
+        setActiveId(next.id);
+        return [next];
+      }
+      if (id === activeId) {
+        setActiveId(remaining[0].id);
+      }
+      return remaining;
+    });
+  };
+
+  const filteredConversations = conversations.filter((c) =>
+    c.title.toLowerCase().includes(search.toLowerCase())
+  );
+
+  return (
+    <AppErrorBoundary>
+    <div className="app">
+      <div className="app-content">
+        <div style={{
+          position: 'absolute',
+          top: 0,
+          left: 0,
+          right: 0,
+          height: 38, /* Traffic light safe area */
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          WebkitAppRegion: 'drag',
+          zIndex: 9999,
+          pointerEvents: 'none',
+          fontSize: 12,
+          fontWeight: 600,
+          color: 'rgba(0,0,0,0.4)'
+        }}>
+          <button
+            className="window-toggle-btn no-drag"
+            onClick={() => setSidebarCollapsed((s) => !s)}
+            title="Toggle Sidebar"
+            style={{
+              pointerEvents: 'auto',
+              position: 'absolute',
+              left: 85, /* Avoid traffic lights */
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              background: 'transparent',
+              border: 'none',
+              cursor: 'default',
+              padding: 4,
+              borderRadius: 4,
+              color: 'rgba(0,0,0,0.5)'
+            }}
+          >
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M4 6H20M4 12H20M4 18H20" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+          Nav
+        </div>
+        <div className={`left-column ${sidebarCollapsed ? "collapsed" : ""}`} style={{ width: sidebarCollapsed ? 68 : sidebarWidth }}>
+          <button className="new-chat-btn" onClick={createConversation} title="New Chat">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+              <path d="M12 4V20M4 12H20" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            <span>New Chat</span>
+          </button>
+
+          <aside
+            className={`sidebar ${sidebarCollapsed ? "collapsed" : ""}`}
+            style={{ width: "100%" }}
+          >
+            <div className="sidebar-header drag-region">
+              {/* Logo removed from here */}
+              {/* Logo removed from here */}
+            </div>
+
+            {!sidebarCollapsed && (
+              <>
+                <div className="convo-list">
+                  {filteredConversations.map((c) => (
+                    <div
+                      key={c.id}
+                      className={`convo-item ${c.id === activeId ? "active" : ""}`}
+                      onClick={() => setActiveId(c.id)}
+                    >
+                      <div className="convo-title-row">
+                        <div className="convo-title">{c.title}</div>
+                      </div>
+                      <button
+                        className="convo-delete no-drag"
+                        title="Delete chat"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          deleteConversation(c.id);
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" aria-hidden="true">
+                          <path d="M9 3h6l1 2h4v2H4V5h4l1-2z" />
+                          <path d="M6 9h12l-1 11H7L6 9z" />
+                        </svg>
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <div className="sidebar-footer">
+                  <button
+                    className={`btn-outline ${sidebarCollapsed ? "icon-only" : ""}`}
+                    onClick={() => setSettingsOpen(true)}
+                    title="Settings"
+                    style={sidebarCollapsed ? {
+                      padding: 10,
+                      width: 36,
+                      height: 36,
+                      display: 'flex',
+                      justifyContent: 'center',
+                      alignItems: 'center',
+                      borderRadius: '50%',
+                      margin: '0 auto'
+                    } : {}}
+                  >
+                    {sidebarCollapsed ? (
+                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M12 15C13.6569 15 15 13.6569 15 12C15 10.3431 13.6569 9 12 9C10.3431 9 9 10.3431 9 12C9 13.6569 10.3431 15 12 15Z" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                        <path d="M19.4 15C19.743 14.5165 20.0345 13.9922 20.264 13.447C20.6698 12.4828 20.6698 11.5172 20.264 10.553C20.0345 10.0078 19.743 9.48353 19.4 9M19.4 15C19.4 15 18 14.4 17.2 14.4C16.5 14.4 15.8 14.8 15.6 15.6C15.4 16.4 15.8 17 15.8 17C15.8 17 16.8 18 16.8 18C16.8 18 15.8 19.2 14.8 19.8C14.8 19.8 14 19 13.2 19C12.4 19 11.6 19 10.8 19C10 19 9.2 19.8 9.2 19.8C9.2 19.8 8.2 18.6 8.2 18.6C8.2 18.6 9.2 17.6 9.2 17.6C9.2 16.8 9.6 16.2 9.4 15.4C9.2 14.6 8.5 14.2 7.8 14.2C7 14.2 5.6 15 5.6 15M19.4 9C19.4 9 18 9.6 17.2 9.6C16.5 9.6 15.8 9.2 15.6 8.4C15.4 7.6 15.8 7 15.8 7C15.8 7 16.8 6 16.8 6C16.8 6 15.8 4.8 14.8 4.2C14.8 4.2 14 5 13.2 5C12.4 5 11.6 5 10.8 5C10 5 9.2 4.2 9.2 4.2C9.2 4.2 8.2 5.4 8.2 5.4C8.2 5.4 9.2 6.4 9.2 6.4C9.2 7.2 9.6 7.8 9.4 8.6C9.2 9.4 8.5 9.8 7.8 9.8C7 9.8 5.6 9 5.6 9M5.6 15C5.25701 14.5165 4.96547 13.9922 4.736 13.447C4.33022 12.4828 4.33022 11.5172 4.736 10.553C4.96547 10.0078 5.25701 9.48353 5.6 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    ) : "Settings"}
+                  </button>
+                </div>
+              </>
+            )}
+            {!sidebarCollapsed && (
+              <div
+                className="sidebar-resizer"
+                onMouseDown={(e) => {
+                  const startX = e.clientX;
+                  const startWidth = sidebarWidth;
+                  const onMove = (moveEvent) => {
+                    const next = Math.min(420, Math.max(240, startWidth + moveEvent.clientX - startX));
+                    setSidebarWidth(next);
+                  };
+                  const onUp = () => {
+                    window.removeEventListener("mousemove", onMove);
+                    window.removeEventListener("mouseup", onUp);
+                  };
+                  window.addEventListener("mousemove", onMove);
+                  window.addEventListener("mouseup", onUp);
+                }}
+              />
+            )}
+          </aside>
+        </div>
+
+        <section className="main">
+          <div className="header border border-b rounded-full drag-region">
+            <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+              <div>
+                <div className="header-title">{activeConversation?.title || "Conversation"}</div>
+                <div className="header-status">{running ? "Running" : "Idle"}</div>
+              </div>
+            </div>
+            {running ? (
+              <button className="btn-outline no-drag" onClick={stopAgent}>Stop</button>
+            ) : null}
+          </div>
+          {wsStatus !== "connected" && (
+            <div className="banner">
+              Agent server: {wsStatus}. {wsError || "Attempting to reconnect."}
+            </div>
+          )}
+          {!apiKeyStatus.connected && (
+            <div className="banner">
+              API key not added. You can browse and chat locally, but the agent cannot call models until a key is saved.
+            </div>
+          )}
+
+          <div className="thread">
+            {activeConversation?.messages.map((m, idx) => (
+              <div key={m?.id ?? `msg-${idx}`} className={`message ${m?.role ?? "assistant"}`}>
+                <div className={`bubble ${m?.role ?? "assistant"}`}>
+                  <div>{typeof m?.content === "string" ? m.content : String(m?.content ?? "")}</div>
+                  {m.role === "assistant" && m.activity?.steps?.length ? (
+                    <ActivityTrace
+                      steps={m.activity.steps}
+                      onOpen={(shot) => setViewer(shot)}
+                    />
+                  ) : null}
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="composer">
+            <div className="composer-input">
+              <input
+                type="text"
+                placeholder="Tell the agent what to do..."
+                value={composer}
+                onChange={(e) => setComposer(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    sendPrompt();
+                  }
+                }}
+              />
+              <button className="btn-primary send-inline" onClick={sendPrompt} disabled={!ws}>
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                  <path d="M7 17L17 7M17 7H7M17 7V17" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {settingsOpen && (
+          <SettingsModal
+            settings={settings}
+            onClose={() => setSettingsOpen(false)}
+            onSave={(next) => {
+              setSettings(next);
+              window.navai?.settingsSet(next);
+            }}
+            onUpdateKey={() => setApiKeyStatus({ connected: false })}
+          />
+        )}
+
+        {!apiKeyStatus.connected && <ApiKeyModal onSaved={() => window.navai?.apiKeyStatus().then(setApiKeyStatus)} />}
+
+        {viewer && (
+          <ImageViewer
+            image={viewer}
+            onClose={() => setViewer(null)}
+          />
+        )}
+
+        {showEntrance && (
+          <EntranceScreen onComplete={() => setShowEntrance(false)} />
+        )}
+      </div>
+    </div>
+    </AppErrorBoundary>
+  );
+}

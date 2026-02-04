@@ -1,0 +1,27 @@
+# Environment and API keys - NEVER commit these
+.env
+.env.local
+.env.*.local
+
+# Dependencies
+node_modules/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build outputs
+dist/
+build/
+*.pyc
+__pycache__/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
