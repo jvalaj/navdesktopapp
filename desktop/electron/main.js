@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, screen } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, screen, protocol, net } from "electron";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -10,6 +10,18 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const preloadPath = path.resolve(__dirname, "preload.cjs");
 const store = new Store({ name: "nav-ai" });
 const APIKEY_KEY = "anthropicApiKey";
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: "navai",
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true,
+      corsEnabled: true
+    }
+  }
+]);
 
 function getStorageDirs() {
   const userData = app.getPath("userData");
@@ -176,6 +188,12 @@ function setCaptureMode(enabled) {
 }
 
 app.whenReady().then(async () => {
+  protocol.handle("navai", (request) => {
+    const url = new URL(request.url);
+    const decodedPath = decodeURIComponent(url.pathname || "");
+    return net.fetch(pathToFileURL(decodedPath).toString());
+  });
+
   ensureStorageDirs();
   createWindow();
   if (app.dock && iconPath) {

@@ -7,13 +7,16 @@ export default function ImageViewer({ image, onClose, screenshotsDir }) {
   if (!image) return null;
 
   const fullPath = resolveScreenshotPath(image.path, screenshotsDir);
+  const imgSrc = fullPath
+    ? (window.navai?.fileUrl?.(fullPath) || `file://${fullPath}`)
+    : "";
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="viewer">
           <img
-            src={fullPath ? `file://${fullPath}` : ""}
+            src={imgSrc}
             alt="screenshot"
             style={{ transform: `scale(${zoom})`, transformOrigin: "center" }}
           />

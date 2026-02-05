@@ -20,11 +20,14 @@ export default function ActivityTrace({ steps, onOpen, screenshotsDir }) {
                   <div className="thumb-grid">
                     {step.screenshots.map((shot, shotIdx) => {
                       const fullPath = resolveScreenshotPath(shot.path, screenshotsDir);
+                      const imgSrc = fullPath
+                        ? (window.navai?.fileUrl?.(fullPath) || `file://${fullPath}`)
+                        : "";
                       return (
                         <img
                           key={`step-${stepIdx}-shot-${shotIdx}`}
                           className="thumb"
-                          src={fullPath ? `file://${fullPath}` : ""}
+                          src={imgSrc}
                           alt="screenshot"
                           onClick={() => onOpen(shot)}
                         />
