@@ -1,9 +1,8 @@
 const { contextBridge, ipcRenderer } = require("electron");
-const path = require("path");
 
 function toFileUrl(filePath) {
   if (!filePath) return "";
-  const normalized = path.normalize(filePath).replace(/\\/g, "/");
+  const normalized = String(filePath).replace(/\\/g, "/");
   return "navai://" + encodeURI(normalized);
 }
 

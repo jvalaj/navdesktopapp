@@ -17,6 +17,7 @@ from anthropic import Anthropic
 
 PORT = int(os.environ.get("NAVAI_SERVER_PORT", "8765"))
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+SCREENSHOTS_DIR = (os.environ.get("NAVAI_SCREENSHOTS_DIR") or "").strip()
 
 clients = set()
 current_task = None
@@ -52,10 +53,11 @@ async def emit_step(step_id, title, caption=None, conversation_id=None):
 
 
 async def emit_screenshot(step_id, path, caption=None, conversation_id=None):
+    normalized_path = _normalize_screenshot_path(path)
     payload = {
         "type": "screenshot",
         "stepId": step_id,
-        "path": path,
+        "path": normalized_path,
         "caption": caption,
         "timestamp": now_ts(),
     }
@@ -73,6 +75,19 @@ def _choose_one_screenshot_path(primary: str = None, secondary: str = None) -> s
     if secondary:
         return secondary
     return None
+
+
+def _normalize_screenshot_path(path: str = None) -> str:
+    """Return a stable absolute screenshot path for renderer consumption."""
+    if not path:
+        return ""
+    p = os.path.expanduser(str(path).strip())
+    if os.path.isabs(p):
+        return os.path.normpath(p)
+    if SCREENSHOTS_DIR:
+        # Use basename to prevent duplicate/incorrect nested relative segments.
+        return os.path.normpath(os.path.join(SCREENSHOTS_DIR, os.path.basename(p)))
+    return os.path.normpath(os.path.abspath(p))
 
 
 async def emit_tool(step_id, caption=None, conversation_id=None):

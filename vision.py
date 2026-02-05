@@ -553,34 +553,81 @@ def parse_ui_everything(img_bgr,
 
 def draw(img_bgr, boxes, show_click_points=True):
     out = img_bgr.copy()
-    outline_color = (0, 255, 0)  # green for all elements (BGR)
-    text_color = (0, 0, 0)       # black for ID labels
-    click_color = (0, 0, 255)    # red for click points
+    h, w = out.shape[:2]
+
+    # Style tuning for readability at higher resolutions.
+    outline_color = (0, 255, 0)   # green for element boxes (BGR)
+    click_color = (0, 0, 255)     # red for click points
+    label_bg = (0, 215, 255)      # gold/yellow label background (BGR)
+    label_border = (0, 0, 0)      # black border for label
+    label_text = (0, 0, 0)        # black text on yellow
+
+    # Scale font/line widths based on image size to keep IDs legible.
+    base = max(1, min(w, h))
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    font_scale = max(0.6, min(1.2, base / 1400.0))
+    text_thickness = max(1, int(round(font_scale * 2)))
+    rect_thickness = max(1, int(round(font_scale * 2)))
+    pad_x = max(3, int(round(font_scale * 4)))
+    pad_y = max(2, int(round(font_scale * 3)))
+
+    def _rects_overlap(a, b):
+        return not (a[2] <= b[0] or a[0] >= b[2] or a[3] <= b[1] or a[1] >= b[3])
+
+    def _clamp_rect(x1, y1, rw, rh):
+        x1 = max(0, min(w - rw, x1))
+        y1 = max(0, min(h - rh, y1))
+        return x1, y1, x1 + rw, y1 + rh
+
+    occupied = []
+
     for b in boxes:
         x1, y1, x2, y2 = b["x1"], b["y1"], b["x2"], b["y2"]
-        cv2.rectangle(out, (x1, y1), (x2, y2), outline_color, 2)
+        cv2.rectangle(out, (x1, y1), (x2, y2), outline_color, rect_thickness)
 
-        # label text
+        # Use ID only for labels to reduce OCR ambiguity in the overlay.
         label = f'{b["id"]}'
-        # optional: add a bit of OCR text to help visual matching
-        if b.get("text"):
-            t = b["text"][:18]
-            label = f'{b["id"]}: {t}'
+        (tw, th), _baseline = cv2.getTextSize(label, font, font_scale, text_thickness)
 
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        font_scale = 0.7
-        thickness = 2
+        # Prefer placing label above the box; if not possible, place inside.
+        label_w = tw + 2 * pad_x
+        label_h = th + 2 * pad_y
+        candidates = [
+            (x1, y1 - label_h),         # above left
+            (x2 - label_w, y1 - label_h),# above right
+            (x1, y1),                    # inside top-left
+            (x2 - label_w, y1),          # inside top-right
+            (x1, y2),                    # below left
+            (x2 - label_w, y2),          # below right
+            (x1 - label_w, y1),          # left
+            (x2, y1),                    # right
+        ]
 
-        (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-        # filled background (green to match outline)
-        cv2.rectangle(out, (x1, max(0, y1 - th - 8)), (x1 + tw + 6, y1), outline_color, -1)
-        cv2.putText(out, label, (x1 + 3, y1 - 5),
-                    font, font_scale, text_color, thickness, cv2.LINE_AA)
+        lx1 = ly1 = lx2 = ly2 = None
+        for cx, cy in candidates:
+            rx1, ry1, rx2, ry2 = _clamp_rect(int(cx), int(cy), int(label_w), int(label_h))
+            if all(not _rects_overlap((rx1, ry1, rx2, ry2), o) for o in occupied):
+                lx1, ly1, lx2, ly2 = rx1, ry1, rx2, ry2
+                break
+
+        if lx1 is None:
+            # Fallback: clamp above-left even if it overlaps.
+            lx1, ly1, lx2, ly2 = _clamp_rect(x1, y1 - label_h, int(label_w), int(label_h))
+        occupied.append((lx1, ly1, lx2, ly2))
+
+        # Draw label background + border.
+        cv2.rectangle(out, (lx1, ly1), (lx2, ly2), label_bg, -1)
+        cv2.rectangle(out, (lx1, ly1), (lx2, ly2), label_border, max(1, rect_thickness - 1))
+
+        # Draw label text.
+        tx = lx1 + pad_x
+        ty = ly1 + pad_y + th
+        cv2.putText(out, label, (tx, ty), font, font_scale, label_text, text_thickness, cv2.LINE_AA)
 
         # Optional: draw click point (no coordinates)
         if show_click_points and "click_x" in b and "click_y" in b:
             cx, cy = int(b["click_x"]), int(b["click_y"])
-            cv2.circle(out, (cx, cy), 3, click_color, -1)
+            cv2.circle(out, (cx, cy), max(2, int(round(font_scale * 2))), click_color, -1)
 
     return out
 

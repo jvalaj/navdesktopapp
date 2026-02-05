@@ -12,8 +12,9 @@ from enum import Enum
 pyautogui.FAILSAFE = True  # Move mouse to corner to abort
 pyautogui.PAUSE = 0.1  # Small pause between actions
 
-# Screen size for validation
-SCREEN_WIDTH, SCREEN_HEIGHT = pyautogui.size()
+def _get_screen_size():
+    """Get current screen dimensions (refresh each call to avoid stale sizes)."""
+    return pyautogui.size()
 
 
 class ClickType(Enum):
@@ -53,8 +54,9 @@ def click_at(
     try:
         # Normalize + clamp coordinates.
         # pyautogui expects x in [0, width-1], y in [0, height-1].
-        max_x = max(0, int(SCREEN_WIDTH) - 1)
-        max_y = max(0, int(SCREEN_HEIGHT) - 1)
+        screen_w, screen_h = _get_screen_size()
+        max_x = max(0, int(screen_w) - 1)
+        max_y = max(0, int(screen_h) - 1)
         x = int(round(x))
         y = int(round(y))
         x = max(0, min(x, max_x))
@@ -188,9 +190,10 @@ def drag_to(
     """
     try:
         # Validate coordinates
-        if not (0 <= start_x <= SCREEN_WIDTH and 0 <= end_x <= SCREEN_WIDTH):
+        screen_w, screen_h = _get_screen_size()
+        if not (0 <= start_x <= screen_w and 0 <= end_x <= screen_w):
             return {"success": False, "error": "X coordinates out of bounds"}
-        if not (0 <= start_y <= SCREEN_HEIGHT and 0 <= end_y <= SCREEN_HEIGHT):
+        if not (0 <= start_y <= screen_h and 0 <= end_y <= screen_h):
             return {"success": False, "error": "Y coordinates out of bounds"}
 
         # Perform the drag
@@ -391,11 +394,12 @@ def get_screen_size() -> dict:
     Returns:
         dict with width and height
     """
+    screen_w, screen_h = _get_screen_size()
     return {
         "success": True,
-        "width": SCREEN_WIDTH,
-        "height": SCREEN_HEIGHT,
-        "message": f"Screen size: {SCREEN_WIDTH}x{SCREEN_HEIGHT}"
+        "width": screen_w,
+        "height": screen_h,
+        "message": f"Screen size: {screen_w}x{screen_h}"
     }
 
 

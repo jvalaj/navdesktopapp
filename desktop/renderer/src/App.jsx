@@ -576,6 +576,7 @@ export default function App() {
                     <ActivityTrace
                       steps={m.activity.steps}
                       onOpen={(shot) => setViewer(shot)}
+                      screenshotsDir={storagePaths.screenshotsDir}
                     />
                   ) : null}
                 </div>
@@ -678,6 +679,7 @@ export default function App() {
           <ImageViewer
             image={viewer}
             onClose={() => setViewer(null)}
+            screenshotsDir={storagePaths.screenshotsDir}
           />
         )}
 

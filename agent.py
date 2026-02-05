@@ -139,6 +139,12 @@ class Agent:
         self.thinking_enabled = thinking_enabled
         self.step_count = 0
         self.last_vision_data = None  # Stores last vision analysis results
+        self.last_raw_screenshot: Optional[str] = None
+        self.last_visual_delta: Optional[float] = None
+        self.last_action_name: Optional[str] = None
+        self.last_action_success: Optional[bool] = None
+        self.progress_score: float = 0.0
+        self.last_progress_note: str = "unknown"
         # State management for smarter decisions
         self.clicked_elements: List[int] = []  # Track clicked element IDs
         self.action_history: List[Dict[str, Any]] = []  # Track recent actions
@@ -151,6 +157,65 @@ class Agent:
         # Resize to small size for fast hashing
         small = cv2.resize(img, (100, 100))
         return hashlib.md5(small.tobytes()).hexdigest()
+
+    def _compute_visual_delta(self, prev_path: str, curr_path: str) -> Optional[float]:
+        """
+        Compute a coarse visual change percentage between two screenshots.
+        Returns a percent in [0, 100], or None if comparison fails.
+        """
+        try:
+            img1 = cv2.imread(prev_path)
+            img2 = cv2.imread(curr_path)
+            if img1 is None or img2 is None:
+                return None
+            # Downscale both to a common size to stabilize diff cost.
+            size = (128, 128)
+            img1 = cv2.resize(img1, size, interpolation=cv2.INTER_AREA)
+            img2 = cv2.resize(img2, size, interpolation=cv2.INTER_AREA)
+            g1 = cv2.cvtColor(img1, cv2.COLOR_BGR2GRAY)
+            g2 = cv2.cvtColor(img2, cv2.COLOR_BGR2GRAY)
+            diff = cv2.absdiff(g1, g2)
+            mean_diff = float(diff.mean()) / 255.0
+            return max(0.0, min(100.0, mean_diff * 100.0))
+        except Exception:
+            return None
+
+    def _update_progress(self, visual_delta: Optional[float]) -> None:
+        """
+        Update a coarse progress estimate based on visual change and action success.
+        This is a heuristic signal, not a task-specific completion guarantee.
+        """
+        if visual_delta is None:
+            self.last_progress_note = "unknown"
+            return
+
+        change = 0.0
+        if visual_delta >= 10.0:
+            change += 8.0
+            note = "major UI change"
+        elif visual_delta >= 5.0:
+            change += 5.0
+            note = "moderate UI change"
+        elif visual_delta >= 2.0:
+            change += 2.0
+            note = "minor UI change"
+        elif visual_delta < 0.5:
+            change -= 3.0
+            note = "no visible change"
+        else:
+            change -= 1.0
+            note = "very small change"
+
+        if self.last_action_success is False:
+            change -= 4.0
+            note = f"{note}; last action failed"
+
+        # Wait/see/detect are informational; avoid inflating progress.
+        if self.last_action_name in ("wait", "see", "detect_elements"):
+            change = min(change, 1.0)
+
+        self.progress_score = max(0.0, min(100.0, self.progress_score + change))
+        self.last_progress_note = note
 
     def _has_ui_changed(self, new_screenshot_path: str) -> bool:
         """Check if UI has changed since last screenshot."""
@@ -207,48 +272,27 @@ class Agent:
             return self.run_vision_analysis()
         return self.last_vision_data
 
-    def _infer_single_scale(self, shot_width: int, shot_height: int, screen_info: Dict[str, Any]) -> Dict[str, Any]:
+    def _infer_scale(self, shot_width: int, shot_height: int, screen_info: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Infer a single scale factor from screenshot-space to PyAutoGUI-space.
-        Prefers explicit logical/physical matches; falls back to size ratio.
+        Infer per-axis scale factors from screenshot-space to PyAutoGUI-space.
+        Prefer direct size ratios to avoid Quartz-space ambiguity.
         """
-        def _match_dims(a, b, tol=2):
-            return abs(a[0] - b[0]) <= tol and abs(a[1] - b[1]) <= tol
-
         shot = (int(shot_width), int(shot_height))
+        pyauto = (int(screen_info["pyauto_width"]), int(screen_info["pyauto_height"]))
         logical = (int(screen_info["logical_width"]), int(screen_info["logical_height"]))
         physical = (int(screen_info["physical_width"]), int(screen_info["physical_height"]))
-        pyauto = (int(screen_info["pyauto_width"]), int(screen_info["pyauto_height"]))
-        scale_factor = float(screen_info.get("scale_factor", 1.0) or 1.0)
 
-        shot_space = "logical" if _match_dims(shot, logical) else "physical" if _match_dims(shot, physical) else "unknown"
-        pyauto_space = "logical" if _match_dims(pyauto, logical) else "physical" if _match_dims(pyauto, physical) else "unknown"
-
-        reason = "fallback_ratio"
-        if shot_space != "unknown" and pyauto_space == shot_space:
-            scale = 1.0
-            reason = "shot=pyauto_space"
-        elif shot_space == "logical" and pyauto_space == "physical":
-            scale = scale_factor
-            reason = "logical_to_physical"
-        elif shot_space == "physical" and pyauto_space == "logical":
-            scale = 1.0 / scale_factor if scale_factor != 0 else 1.0
-            reason = "physical_to_logical"
-        else:
-            sx = pyauto[0] / shot[0] if shot[0] else 1.0
-            sy = pyauto[1] / shot[1] if shot[1] else 1.0
-            scale = (sx + sy) / 2.0
+        sx = pyauto[0] / shot[0] if shot[0] else 1.0
+        sy = pyauto[1] / shot[1] if shot[1] else 1.0
 
         return {
-            "scale": float(scale),
-            "reason": reason,
-            "shot_space": shot_space,
-            "pyauto_space": pyauto_space,
+            "scale_x": float(sx),
+            "scale_y": float(sy),
+            "reason": "ratio_pyauto_to_shot",
             "shot": shot,
             "pyauto": pyauto,
             "logical": logical,
             "physical": physical,
-            "scale_factor": scale_factor,
         }
 
     def _box_contains_point(self, box: Dict[str, Any], x: int, y: int) -> bool:
@@ -325,6 +369,14 @@ class Agent:
         screenshot_path = SCREENSHOT_DIR / f"screenshot_{timestamp}.png"
         screenshot.save(str(screenshot_path))
 
+        # Compute visual delta vs previous screenshot (if any)
+        visual_delta = None
+        if self.last_raw_screenshot:
+            visual_delta = self._compute_visual_delta(self.last_raw_screenshot, str(screenshot_path))
+        self.last_raw_screenshot = str(screenshot_path)
+        self.last_visual_delta = visual_delta
+        self._update_progress(visual_delta)
+
         # Get screenshot dimensions
         shot_width, shot_height = screenshot.size
 
@@ -376,7 +428,8 @@ class Agent:
             "json_path": str(json_path),
             "shot_width": shot_width,
             "shot_height": shot_height,
-            "screen_info": screen_info
+            "screen_info": screen_info,
+            "visual_delta": visual_delta
         }
 
         return self.last_vision_data
@@ -396,7 +449,12 @@ class Agent:
             return "No UI elements detected."
 
         summary = []
-        summary.append(f"Detected {len(boxes)} UI elements:\n")
+        summary.append(f"Detected {len(boxes)} UI elements:")
+        if self.last_visual_delta is not None:
+            summary.append(f"Visual change since last step: ~{self.last_visual_delta:.1f}%")
+            summary.append(f"Progress estimate: ~{self.progress_score:.0f}/100 ({self.last_progress_note})\n")
+        else:
+            summary.append("")
 
         for box in boxes:
             box_type = box.get("type", "unknown")
@@ -501,27 +559,28 @@ class Agent:
         shot_width = vision_data.get("shot_width", screen_info["pyauto_width"])
         shot_height = vision_data.get("shot_height", screen_info["pyauto_height"])
 
-        scale_info = self._infer_single_scale(shot_width, shot_height, screen_info)
-        scale = scale_info["scale"]
+        scale_info = self._infer_scale(shot_width, shot_height, screen_info)
+        scale_x = scale_info["scale_x"]
+        scale_y = scale_info["scale_y"]
 
         # Get click coordinates from vision data and scale to screen coordinates
         cx = box.get("click_x", box["cx"])
         cy = box.get("click_y", box["cy"])
-        scaled_x = round(cx * scale)
-        scaled_y = round(cy * scale)
+        scaled_x = round(cx * scale_x)
+        scaled_y = round(cy * scale_y)
         box_type = box.get("type", "unknown")
         text = box.get("text", "")
 
-        if scale_info["reason"] != "shot=pyauto_space":
-            print(
-                "Scale mapping: "
-                f"scale={scale_info['scale']:.3f} "
-                f"reason={scale_info['reason']} "
-                f"shot={scale_info['shot']} "
-                f"pyauto={scale_info['pyauto']} "
-                f"logical={scale_info['logical']} "
-                f"physical={scale_info['physical']}"
-            )
+        print(
+            "Scale mapping: "
+            f"scale_x={scale_x:.3f} "
+            f"scale_y={scale_y:.3f} "
+            f"reason={scale_info['reason']} "
+            f"shot={scale_info['shot']} "
+            f"pyauto={scale_info['pyauto']} "
+            f"logical={scale_info['logical']} "
+            f"physical={scale_info['physical']}"
+        )
 
         # Execute the click with scaled coordinates
         if click_type == "left":
@@ -566,12 +625,13 @@ class Agent:
         screen_info = self.get_screen_info()
         shot_width = vision_data.get("shot_width", screen_info["pyauto_width"])
         shot_height = vision_data.get("shot_height", screen_info["pyauto_height"])
-        scale_info = self._infer_single_scale(shot_width, shot_height, screen_info)
-        scale = scale_info["scale"] if scale_info["scale"] != 0 else 1.0
+        scale_info = self._infer_scale(shot_width, shot_height, screen_info)
+        scale_x = scale_info["scale_x"] if scale_info["scale_x"] != 0 else 1.0
+        scale_y = scale_info["scale_y"] if scale_info["scale_y"] != 0 else 1.0
 
         # Map screen coords -> screenshot coords
-        shot_x = int(round(x / scale))
-        shot_y = int(round(y / scale))
+        shot_x = int(round(x / scale_x))
+        shot_y = int(round(y / scale_y))
         target_box = self._select_best_box_for_point(shot_x, shot_y, vision_data["boxes"])
         if target_box:
             return self.action_click_element(element_id=target_box.get("id"), click_type=click_type)
@@ -968,6 +1028,12 @@ The user's goal will be provided in the user message."""
         result = action_map[action]()
         if isinstance(result, dict):
             result["_normalized_action"] = normalized_action
+        # Track last action for progress heuristics
+        self.last_action_name = normalized_action
+        if isinstance(result, dict):
+            self.last_action_success = bool(result.get("success")) if "success" in result else None
+        else:
+            self.last_action_success = None
         return result
 
     def get_llm_decision(

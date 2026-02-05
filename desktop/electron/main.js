@@ -1,115 +1,36 @@
-import { app, BrowserWindow, ipcMain, dialog, shell, screen, protocol, net } from "electron";
+import { app, BrowserWindow, ipcMain, dialog, shell, screen } from "electron";
 import path from "node:path";
-import fs from "node:fs";
-import { pathToFileURL, fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import fs from "node:fs";
 import Store from "electron-store";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-protocol.registerSchemesAsPrivileged([
-  { scheme: "navai", privileges: { standard: true, supportFetchAPI: true } }
-]);
+import { pathToFileURL, fileURLToPath } from "node:url";
 
 const isDev = !app.isPackaged;
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const preloadPath = path.resolve(__dirname, "preload.cjs");
 const store = new Store({ name: "nav-ai" });
 const APIKEY_KEY = "anthropicApiKey";
+
+function getStorageDirs() {
+  const userData = app.getPath("userData");
+  const conversationsDir = path.join(userData, "storage", "conversations");
+  const screenshotsDir = path.join(userData, "storage", "screenshots");
+  return { conversationsDir, screenshotsDir };
+}
+
+function ensureStorageDirs() {
+  const { conversationsDir, screenshotsDir } = getStorageDirs();
+  fs.mkdirSync(conversationsDir, { recursive: true });
+  fs.mkdirSync(screenshotsDir, { recursive: true });
+}
 
 let mainWindow;
 let pythonProc;
 let serverPort = 8765;
 const iconPath = path.resolve(app.getAppPath(), "navlogo.png");
 let restoreBounds = null;
-let restoreOpacity = 1;       // used by setAgentWindowMode
-let captureRestoreOpacity = 1; // used by setCaptureMode (separate to avoid cross-talk)
+let restoreOpacity = 1;
 let animTimer = null;
-let overlayWindow;
-
-function getStorageDirs() {
-  // Per-user, per-app directory (dynamic for whoever is running the app)
-  const base = path.join(app.getPath("userData"), "storage");
-  const conversationsDir = path.join(base, "conversations");
-  const screenshotsDir = path.join(base, "screenshots");
-  return { base, conversationsDir, screenshotsDir };
-}
-
-function overlayHtmlUrl() {
-  const filePath = isDev
-    ? path.resolve(__dirname, "overlay.html")
-    : path.resolve(app.getAppPath(), "electron", "overlay.html");
-  return pathToFileURL(filePath).toString();
-}
-
-function positionOverlayWindow() {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  const display = screen.getPrimaryDisplay();
-  // Cover the full display so the dashed border surrounds the whole screen.
-  // Use bounds (not workArea) so it wraps menu bar / dock too.
-  const bounds = display.bounds;
-  overlayWindow.setBounds(
-    { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
-    false
-  );
-}
-
-function ensureOverlayWindow() {
-  if (overlayWindow && !overlayWindow.isDestroyed()) return overlayWindow;
-
-  overlayWindow = new BrowserWindow({
-    width: 200,
-    height: 200,
-    x: 0,
-    y: 0,
-    frame: false,
-    transparent: true,
-    resizable: false,
-    movable: false,
-    focusable: false,
-    fullscreenable: true,
-    minimizable: false,
-    maximizable: false,
-    skipTaskbar: true,
-    hasShadow: false,
-    backgroundColor: "#00000000",
-    show: false,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-      backgroundThrottling: false,
-    }
-  });
-
-  // Exclude from macOS screen capture APIs (so it won't show up in agent screenshots).
-  overlayWindow.setContentProtection(true);
-  overlayWindow.setAlwaysOnTop(true, "floating");
-  overlayWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-  overlayWindow.setIgnoreMouseEvents(true);
-
-  overlayWindow.on("closed", () => {
-    overlayWindow = null;
-  });
-
-  overlayWindow.loadURL(overlayHtmlUrl()).catch((err) => {
-    console.error("Failed to load overlay window:", err);
-  });
-
-  positionOverlayWindow();
-  return overlayWindow;
-}
-
-function showOverlay() {
-  const win = ensureOverlayWindow();
-  if (!win) return;
-  positionOverlayWindow();
-  if (!win.isVisible()) win.showInactive();
-}
-
-function hideOverlay() {
-  if (!overlayWindow || overlayWindow.isDestroyed()) return;
-  overlayWindow.hide();
-}
 
 function resolvePythonPath() {
   const stored = store.get("pythonPath");
@@ -127,27 +48,18 @@ async function startPythonServer() {
   const serverScript = resolveServerScript();
   const apiKey = store.get(APIKEY_KEY);
   const { conversationsDir, screenshotsDir } = getStorageDirs();
-  try {
-    fs.mkdirSync(conversationsDir, { recursive: true });
-    fs.mkdirSync(screenshotsDir, { recursive: true });
-  } catch (err) {
-    console.error("Failed to create storage directories:", err);
-  }
   const env = {
     ...process.env,
     NAVAI_SERVER_PORT: String(serverPort),
     ANTHROPIC_API_KEY: apiKey || "",
     NAVAI_CONVERSATIONS_DIR: conversationsDir,
-    NAVAI_SCREENSHOTS_DIR: screenshotsDir,
-    // Prevent Python from showing in dock
-    PYTHONUNBUFFERED: "1"
+    NAVAI_SCREENSHOTS_DIR: screenshotsDir
   };
 
   try {
     pythonProc = spawn(pythonPath, [serverScript], {
       env,
-      stdio: "pipe",
-      detached: false
+      stdio: "pipe"
     });
   } catch (err) {
     console.error("Failed to spawn Python:", err);
@@ -173,25 +85,6 @@ async function startPythonServer() {
 }
 
 function createWindow() {
-  // Resolve preload path - use absolute path in dev, app.getAppPath() in production
-  let preloadPath;
-  if (isDev) {
-    // In dev, use the directory of this file (main.js) to find preload.cjs
-    // __dirname is reliable in ES modules when used this way
-    preloadPath = path.resolve(__dirname, "preload.cjs");
-  } else {
-    preloadPath = path.resolve(app.getAppPath(), "electron", "preload.cjs");
-  }
-
-  // Verify preload file exists
-  if (!fs.existsSync(preloadPath)) {
-    console.error(`Preload script not found at: ${preloadPath}`);
-    console.error(`App path: ${app.getAppPath()}`);
-    console.error(`__dirname: ${__dirname}`);
-  } else {
-    console.log(`Preload script found at: ${preloadPath}`);
-  }
-
   mainWindow = new BrowserWindow({
     width: 1220,
     height: 800,
@@ -201,8 +94,7 @@ function createWindow() {
     webPreferences: {
       preload: preloadPath,
       contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false
+      nodeIntegration: false
     }
   });
 
@@ -259,7 +151,6 @@ function setAgentWindowMode(enabled) {
     mainWindow.setAlwaysOnTop(true, "floating");
     mainWindow.setVisibleOnAllWorkspaces(true);
     mainWindow.setContentProtection(true);
-    showOverlay();
   } else {
     if (restoreBounds) {
       animateTo(restoreBounds);
@@ -269,80 +160,23 @@ function setAgentWindowMode(enabled) {
     mainWindow.setContentProtection(false);
     mainWindow.setOpacity(restoreOpacity || 1);
     mainWindow.setIgnoreMouseEvents(false);
-    hideOverlay();
   }
 }
 
 function setCaptureMode(enabled) {
   if (!mainWindow) return;
   if (enabled) {
-    captureRestoreOpacity = mainWindow.getOpacity();
+    restoreOpacity = mainWindow.getOpacity();
     mainWindow.setOpacity(0);
     mainWindow.setIgnoreMouseEvents(true);
   } else {
-    mainWindow.setOpacity(captureRestoreOpacity || 1);
+    mainWindow.setOpacity(restoreOpacity || 1);
     mainWindow.setIgnoreMouseEvents(false);
   }
 }
 
-function resolveScreenshotPath(filePath) {
-  if (!filePath || typeof filePath !== "string") return null;
-  const appPath = app.getAppPath();
-  const parentDir = path.resolve(appPath, "..");
-  const { screenshotsDir } = getStorageDirs();
-  // Allow screenshots from per-user storage (and keep legacy roots for dev/back-compat)
-  const roots = [screenshotsDir, appPath, parentDir];
-
-  // For absolute paths, normalize and check if it exists
-  if (path.isAbsolute(filePath)) {
-    const normalized = path.normalize(filePath);
-    if (fs.existsSync(normalized)) {
-      // Check if the path is within one of the allowed roots
-      const inRoot = roots.some((r) => {
-        const rel = path.relative(r, normalized);
-        return !rel.startsWith("..");
-      });
-      return inRoot ? normalized : null;
-    }
-    return null;
-  }
-
-  // For relative paths, try each root
-  const normalized = path.normalize(filePath).replace(/^(\.\.(\/|\\))+/g, "").replace(/^\/+/, "");
-  for (const r of roots) {
-    const candidate = path.resolve(r, normalized);
-    if (fs.existsSync(candidate)) {
-      return candidate;
-    }
-  }
-  return null;
-}
-
 app.whenReady().then(async () => {
-  // Keep overlay pinned if display metrics change (screen is only usable after ready).
-  screen.on("display-metrics-changed", () => positionOverlayWindow());
-  screen.on("display-added", () => positionOverlayWindow());
-  screen.on("display-removed", () => positionOverlayWindow());
-
-  protocol.handle("navai", (request) => {
-    // After "navai://", there may be 0-2 slashes before the actual path
-    // We need to preserve a leading slash for absolute paths
-    let urlPart = request.url.slice("navai://".length);
-    // Strip extra slashes from protocol formatting, but keep one if it's an absolute path
-    if (urlPart.startsWith("//")) {
-      urlPart = urlPart.slice(1); // Remove one slash, leave one for absolute path
-    } else if (urlPart.startsWith("/") && !urlPart.startsWith("//")) {
-      // Single slash - keep it for absolute path
-    }
-    const decoded = decodeURIComponent(urlPart);
-    const full = resolveScreenshotPath(decoded);
-    if (!full) {
-      console.log("navai:// 404:", decoded);
-      return new Response("Not found", { status: 404 });
-    }
-    return net.fetch(pathToFileURL(full).toString());
-  });
-
+  ensureStorageDirs();
   createWindow();
   if (app.dock && iconPath) {
     try {
@@ -421,22 +255,6 @@ ipcMain.handle("file:open", async (_event, filePath) => {
   return { ok: true };
 });
 
-ipcMain.handle("storage:paths", async () => {
-  const { conversationsDir, screenshotsDir } = getStorageDirs();
-  return { conversationsDir, screenshotsDir };
-});
-
-ipcMain.handle("storage:open", async (_event, which) => {
-  const { conversationsDir, screenshotsDir } = getStorageDirs();
-  const target =
-    which === "conversations" ? conversationsDir :
-    which === "screenshots" ? screenshotsDir :
-    null;
-  if (!target) return { ok: false };
-  await shell.openPath(target);
-  return { ok: true };
-});
-
 ipcMain.handle("dialog:select-python", async () => {
   const result = await dialog.showOpenDialog({
     properties: ["openFile"],
@@ -454,5 +272,16 @@ ipcMain.handle("window:agent-mode", async (_event, enabled) => {
 
 ipcMain.handle("window:capture-mode", async (_event, enabled) => {
   setCaptureMode(Boolean(enabled));
+  return { ok: true };
+});
+
+ipcMain.handle("storage:paths", async () => {
+  return getStorageDirs();
+});
+
+ipcMain.handle("storage:open", async (_event, which) => {
+  const dirs = getStorageDirs();
+  const dir = which === "screenshots" ? dirs.screenshotsDir : dirs.conversationsDir;
+  if (dir) await shell.openPath(dir);
   return { ok: true };
 });
