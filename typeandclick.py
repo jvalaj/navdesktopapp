@@ -5,7 +5,7 @@ These functions can be exposed as tools/actions for an LLM to interact with the 
 
 import pyautogui
 import time
-from typing import Optional, Literal
+from typing import Optional
 from enum import Enum
 
 # Safety settings
@@ -52,15 +52,22 @@ def click_at(
         click_at(100, 200, "right", 1)  # Right click
     """
     try:
-        # Normalize + clamp coordinates.
-        # pyautogui expects x in [0, width-1], y in [0, height-1].
+        # Normalize and validate coordinates without clamping.
+        # Rejecting invalid clicks is safer than silently clicking screen edges.
         screen_w, screen_h = _get_screen_size()
         max_x = max(0, int(screen_w) - 1)
         max_y = max(0, int(screen_h) - 1)
-        x = int(round(x))
-        y = int(round(y))
-        x = max(0, min(x, max_x))
-        y = max(0, min(y, max_y))
+        x = int(round(float(x)))
+        y = int(round(float(y)))
+
+        if not (0 <= x <= max_x and 0 <= y <= max_y):
+            return {
+                "success": False,
+                "error": (
+                    f"Coordinates ({x}, {y}) are outside display bounds "
+                    f"(0-{max_x}, 0-{max_y})."
+                ),
+            }
 
         # Validate click type
         valid_click_types = ["left", "right", "middle"]
@@ -191,10 +198,17 @@ def drag_to(
     try:
         # Validate coordinates
         screen_w, screen_h = _get_screen_size()
-        if not (0 <= start_x <= screen_w and 0 <= end_x <= screen_w):
-            return {"success": False, "error": "X coordinates out of bounds"}
-        if not (0 <= start_y <= screen_h and 0 <= end_y <= screen_h):
-            return {"success": False, "error": "Y coordinates out of bounds"}
+        max_x = max(0, int(screen_w) - 1)
+        max_y = max(0, int(screen_h) - 1)
+        start_x = int(round(float(start_x)))
+        start_y = int(round(float(start_y)))
+        end_x = int(round(float(end_x)))
+        end_y = int(round(float(end_y)))
+
+        if not (0 <= start_x <= max_x and 0 <= end_x <= max_x):
+            return {"success": False, "error": f"X coordinates out of bounds (0-{max_x})"}
+        if not (0 <= start_y <= max_y and 0 <= end_y <= max_y):
+            return {"success": False, "error": f"Y coordinates out of bounds (0-{max_y})"}
 
         # Perform the drag
         pyautogui.dragTo(

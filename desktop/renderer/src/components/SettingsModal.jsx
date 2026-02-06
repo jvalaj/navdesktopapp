@@ -4,6 +4,12 @@ export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus,
   const [form, setForm] = useState(settings);
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
+  const updateNumber = (key, value, min, max) => {
+    const numeric = Number.parseInt(value, 10);
+    if (Number.isNaN(numeric)) return;
+    const bounded = Math.max(min, Math.min(max, numeric));
+    update(key, bounded);
+  };
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -70,6 +76,50 @@ export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus,
               <option value="off">Execute</option>
               <option value="on">Plan Only</option>
             </select>
+          </label>
+          <label>
+            Verify Every N Steps
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={1}
+              value={form.verificationEveryNSteps ?? form.screenshotFrequency ?? 2}
+              onChange={(e) => updateNumber("verificationEveryNSteps", e.target.value, 1, 12)}
+            />
+          </label>
+          <label>
+            LLM Timeout (seconds)
+            <input
+              type="number"
+              min={5}
+              max={300}
+              step={5}
+              value={form.llmTimeoutSeconds ?? 60}
+              onChange={(e) => updateNumber("llmTimeoutSeconds", e.target.value, 5, 300)}
+            />
+          </label>
+          <label>
+            Max No-Advance Checks
+            <input
+              type="number"
+              min={1}
+              max={12}
+              step={1}
+              value={form.maxStagnantSteps ?? 4}
+              onChange={(e) => updateNumber("maxStagnantSteps", e.target.value, 1, 12)}
+            />
+          </label>
+          <label>
+            Max Stuck Signals
+            <input
+              type="number"
+              min={1}
+              max={8}
+              step={1}
+              value={form.maxStuckSignals ?? 2}
+              onChange={(e) => updateNumber("maxStuckSignals", e.target.value, 1, 8)}
+            />
           </label>
         </div>
         <div style={{ display: "flex", justifyContent: "space-between", marginTop: 16 }}>

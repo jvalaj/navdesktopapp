@@ -77,9 +77,13 @@ export default function App() {
   const [settings, setSettings] = useState({
     model: "claude-sonnet-4-5-20250929",
     screenshotFrequency: 2,
+    verificationEveryNSteps: 2,
     saveScreenshots: true,
     allowSendScreenshots: true,
-    dryRun: false
+    dryRun: false,
+    llmTimeoutSeconds: 60,
+    maxStagnantSteps: 4,
+    maxStuckSignals: 2
   });
   const [search, setSearch] = useState("");
   const [ws, setWs] = useState(null);

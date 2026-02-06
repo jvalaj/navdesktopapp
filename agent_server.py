@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import re
 import uuid
@@ -22,6 +23,19 @@ SCREENSHOTS_DIR = (os.environ.get("NAVAI_SCREENSHOTS_DIR") or "").strip()
 clients = set()
 current_task = None
 stop_event = asyncio.Event()
+LOGGER = logging.getLogger("navai.agent_server")
+if not LOGGER.handlers:
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
+
+def log_event(event: str, **fields):
+    payload = {
+        "component": "agent_server",
+        "event": event,
+        "timestamp": datetime.now().isoformat(),
+    }
+    payload.update(fields)
+    LOGGER.info(json.dumps(payload, default=str))
 
 
 def now_ts():
@@ -32,7 +46,20 @@ async def broadcast(payload):
     if not clients:
         return
     message = json.dumps(payload)
-    await asyncio.gather(*[client.send(message) for client in clients])
+    targets = list(clients)
+    results = await asyncio.gather(
+        *[client.send(message) for client in targets],
+        return_exceptions=True,
+    )
+    for client, result in zip(targets, results):
+        if isinstance(result, Exception):
+            log_event(
+                "websocket_send_failed",
+                error=str(result),
+                client=getattr(client, "id", None),
+                payload_type=payload.get("type"),
+            )
+            clients.discard(client)
 
 
 async def emit_status(state):
@@ -176,6 +203,7 @@ async def handle_title(conversation_id: str, prompt: str, model: str):
 async def run_agent(conversation_id, prompt, settings):
     stop_event.clear()
     await emit_status("running")
+    log_event("run_started", conversation_id=conversation_id, max_steps=settings.get("maxSteps", 20))
 
     agent = None
     assistant_message_id = str(uuid.uuid4())
@@ -192,9 +220,83 @@ async def run_agent(conversation_id, prompt, settings):
         delay_after_action = settings.get("delay", 0.5)
         allow_send_screenshots = settings.get("allowSendScreenshots", True)
         dry_run = settings.get("dryRun", False)
+        llm_timeout_seconds = float(settings.get("llmTimeoutSeconds", 60))
+        verification_every_n_steps = max(
+            1,
+            int(
+                settings.get(
+                    "verificationEveryNSteps",
+                    settings.get("screenshotFrequency", 3),
+                )
+            ),
+        )
+        max_no_advance_checks = settings.get("maxStagnantSteps", 4)
+        max_stuck_signals = settings.get("maxStuckSignals", 2)
+        no_advance_checks = 0
+        stuck_signals = 0
+        verifier_recovery_attempts = 0
+        max_verifier_recovery_attempts = 3
+        latest_verifier_feedback = None
 
         # Save the user's prompt to conversation memory
         agent.memory.add("user", prompt, {"type": "goal"})
+
+        async def run_verifier_check(step_id: str, step_number: int, reason: str, force: bool = True):
+            """Run verifier in worker thread with timeout protection."""
+            if not agent.last_vision_data or not agent.last_vision_data.get("screenshot"):
+                return None
+            screenshot_path = agent.last_vision_data.get("screenshot")
+            summary = agent.get_ui_summary(agent.last_vision_data.get("boxes", []))
+            verifier_timeout = max(5.0, min(llm_timeout_seconds, 45.0))
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(
+                        agent.verify_task_state,
+                        prompt,
+                        screenshot_path,
+                        summary,
+                        force,
+                        step_number,
+                        reason,
+                    ),
+                    timeout=verifier_timeout,
+                )
+            except asyncio.TimeoutError:
+                msg = f"Verifier timed out after {verifier_timeout:.0f}s."
+                log_event(
+                    "verifier_timeout",
+                    conversation_id=conversation_id,
+                    step=step_number,
+                    timeout_seconds=verifier_timeout,
+                    reason=reason,
+                )
+                await emit_tool(step_id, msg, conversation_id)
+                return {
+                    "ran": False,
+                    "goal_satisfied": False,
+                    "task_advanced": None,
+                    "missing": "",
+                    "recommended_recovery": "retry",
+                    "reason": msg,
+                }
+            except Exception as exc:
+                msg = f"Verifier error: {str(exc)}"
+                log_event(
+                    "verifier_failed",
+                    conversation_id=conversation_id,
+                    step=step_number,
+                    reason=reason,
+                    error=str(exc),
+                )
+                await emit_tool(step_id, msg, conversation_id)
+                return {
+                    "ran": False,
+                    "goal_satisfied": False,
+                    "task_advanced": None,
+                    "missing": "",
+                    "recommended_recovery": "retry",
+                    "reason": msg,
+                }
 
         for step in range(max_steps):
             if stop_event.is_set():
@@ -207,33 +309,118 @@ async def run_agent(conversation_id, prompt, settings):
 
             screenshot_to_show = None
             vision_summary = None
+            forced_recovery_decision = None
 
-            if agent.last_vision_data:
-                screenshot_to_show = agent.last_vision_data.get("annotated")
-                vision_summary = agent.get_ui_summary(agent.last_vision_data.get("boxes", []))
-            else:
-                await emit_step(step_id, "Taking screenshot and analyzing UI")
-                vision_data = agent.run_vision_analysis()
-                screenshot_to_show = vision_data.get("annotated")
-                vision_summary = agent.get_ui_summary(vision_data.get("boxes", []))
-                # Emit only ONE screenshot (prefer annotated)
-                chosen = _choose_one_screenshot_path(
-                    primary=vision_data.get("annotated"),
-                    secondary=vision_data.get("screenshot"),
+            # Always refresh vision per step so IDs and OCR reflect the current UI.
+            await emit_step(step_id, "Taking screenshot and analyzing UI")
+            vision_data = agent.run_vision_analysis()
+            screenshot_to_show = vision_data.get("annotated")
+            vision_summary = agent.get_ui_summary(vision_data.get("boxes", []))
+            # Emit only ONE screenshot (prefer annotated)
+            chosen = _choose_one_screenshot_path(
+                primary=vision_data.get("annotated"),
+                secondary=vision_data.get("screenshot"),
+            )
+            if chosen:
+                await emit_screenshot(step_id, chosen, "Screen snapshot", conversation_id)
+
+            if (step + 1) % verification_every_n_steps == 0:
+                await emit_step(step_id, "Verifying task status", conversation_id=conversation_id)
+                periodic_verifier = await run_verifier_check(
+                    step_id=step_id,
+                    step_number=step + 1,
+                    reason="periodic",
+                    force=True,
                 )
-                if chosen:
-                    await emit_screenshot(step_id, chosen, "Screen snapshot", conversation_id)
+                if periodic_verifier:
+                    latest_verifier_feedback = periodic_verifier
+                    if periodic_verifier.get("goal_satisfied"):
+                        reason = periodic_verifier.get("reason", "Verifier confirmed goal completion.")
+                        await emit_step(step_id, "Done", reason, conversation_id)
+                        agent.memory.add(
+                            "assistant",
+                            f"Completed (verified): {reason}",
+                            {"step": step + 1, "status": "done", "reason": "verifier_satisfied"},
+                        )
+                        break
+
+                    if periodic_verifier.get("task_advanced") is False:
+                        no_advance_checks += 1
+                    elif periodic_verifier.get("task_advanced") is True:
+                        no_advance_checks = 0
+
+                    if no_advance_checks >= max_no_advance_checks:
+                        forced_recovery_decision = agent.choose_recovery_action(periodic_verifier)
+                        if forced_recovery_decision and verifier_recovery_attempts < max_verifier_recovery_attempts:
+                            verifier_recovery_attempts += 1
+                            no_advance_checks = 0
+                            await emit_tool(
+                                step_id,
+                                (
+                                    "Verifier recovery selected: "
+                                    f"{forced_recovery_decision.get('action')} "
+                                    f"({periodic_verifier.get('recommended_recovery', 'retry')})"
+                                ),
+                                conversation_id,
+                            )
+                        else:
+                            reason = (
+                                "Blocked: verifier reports no task advancement "
+                                f"for {max_no_advance_checks} checks. "
+                                f"Missing: {periodic_verifier.get('missing', periodic_verifier.get('reason', 'unknown'))}"
+                            )
+                            log_event(
+                                "run_blocked",
+                                conversation_id=conversation_id,
+                                step=step + 1,
+                                reason_code="no_task_advance",
+                                no_advance_checks=no_advance_checks,
+                                verifier_reason=periodic_verifier.get("reason"),
+                                verifier_missing=periodic_verifier.get("missing"),
+                            )
+                            await emit_step(step_id, "Blocked", reason, conversation_id)
+                            agent.memory.add(
+                                "assistant",
+                                reason,
+                                {"step": step + 1, "status": "blocked", "reason": "no_task_advance"},
+                            )
+                            break
 
             if not allow_send_screenshots:
                 screenshot_to_show = None
 
-            # LLM call is synchronous; run it in a worker thread so Stop can cancel this coroutine immediately.
-            decision = await asyncio.to_thread(
-                agent.get_llm_decision,
-                prompt,
-                screenshot_path=screenshot_to_show,
-                vision_summary=vision_summary,
-            )
+            if forced_recovery_decision:
+                decision = forced_recovery_decision
+            else:
+                # LLM call is synchronous; run it in a worker thread so Stop can cancel this coroutine immediately.
+                try:
+                    decision = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            agent.get_llm_decision,
+                            prompt,
+                            screenshot_path=screenshot_to_show,
+                            vision_summary=vision_summary,
+                            verifier_feedback=latest_verifier_feedback,
+                        ),
+                        timeout=max(5.0, llm_timeout_seconds),
+                    )
+                except asyncio.TimeoutError:
+                    reason = f"Blocked: model decision timed out after {llm_timeout_seconds:.0f}s."
+                    log_event(
+                        "run_blocked",
+                        conversation_id=conversation_id,
+                        step=step + 1,
+                        reason_code="llm_timeout",
+                        timeout_seconds=llm_timeout_seconds,
+                    )
+                    await emit_step(step_id, "Blocked", reason, conversation_id)
+                    await emit_tool(step_id, reason, conversation_id)
+                    agent.memory.add(
+                        "assistant",
+                        reason,
+                        {"step": step + 1, "status": "blocked", "reason": "llm_timeout"},
+                    )
+                    break
 
             if stop_event.is_set():
                 await emit_message_delta(assistant_message_id, "assistant", "\nStopped by user.", conversation_id)
@@ -256,9 +443,59 @@ async def run_agent(conversation_id, prompt, settings):
                 break
 
             if action in (None, "done"):
-                await emit_step(step_id, "Done", "Agent reported completion", conversation_id)
-                agent.memory.add("assistant", f"Completed: {thought}", {"step": step + 1, "status": "done"})
-                break
+                done_verifier = await run_verifier_check(
+                    step_id=step_id,
+                    step_number=step + 1,
+                    reason="before_done",
+                    force=True,
+                )
+                if done_verifier:
+                    latest_verifier_feedback = done_verifier
+                if done_verifier and done_verifier.get("goal_satisfied"):
+                    done_reason = done_verifier.get("reason", "Verifier confirmed completion.")
+                    await emit_step(step_id, "Done", done_reason, conversation_id)
+                    agent.memory.add(
+                        "assistant",
+                        f"Completed (verified): {done_reason}",
+                        {"step": step + 1, "status": "done", "reason": "verifier_satisfied"},
+                    )
+                    break
+
+                recovery = agent.choose_recovery_action(done_verifier)
+                if recovery:
+                    done_verifier_meta = done_verifier or {}
+                    await emit_tool(
+                        step_id,
+                        (
+                            "Verifier rejected done; recovery action: "
+                            f"{recovery.get('action')} ({done_verifier_meta.get('recommended_recovery', 'retry')})"
+                        ),
+                        conversation_id,
+                    )
+                    thought = recovery.get("thought", thought)
+                    action = recovery.get("action")
+                    params = recovery.get("params", {})
+                else:
+                    done_verifier_meta = done_verifier or {}
+                    reason = (
+                        "Blocked: completion not verified. "
+                        f"Missing: {done_verifier_meta.get('missing', done_verifier_meta.get('reason', 'unknown'))}"
+                    )
+                    log_event(
+                        "run_blocked",
+                        conversation_id=conversation_id,
+                        step=step + 1,
+                        reason_code="completion_not_verified",
+                        verifier_reason=(done_verifier or {}).get("reason"),
+                        verifier_missing=(done_verifier or {}).get("missing"),
+                    )
+                    await emit_step(step_id, "Blocked", reason, conversation_id)
+                    agent.memory.add(
+                        "assistant",
+                        reason,
+                        {"step": step + 1, "status": "blocked", "reason": "completion_not_verified"},
+                    )
+                    break
 
             await emit_step(step_id, f"{action}", conversation_id=conversation_id)
 
@@ -267,6 +504,12 @@ async def run_agent(conversation_id, prompt, settings):
                 continue
 
             result = agent.execute_action(action, params)
+            normalized_action = result.get("_normalized_action", action)
+            agent._record_action(
+                normalized_action,
+                params if isinstance(params, dict) else {"value": params},
+                result,
+            )
             if result.get("success"):
                 await emit_tool(step_id, result.get("message", "Executed"), conversation_id)
                 agent.memory.add(
@@ -281,8 +524,6 @@ async def run_agent(conversation_id, prompt, settings):
                     f"Failed {action}: {result.get('error', 'Unknown error')}",
                     {"step": step + 1, "action": action, "result": "error"},
                 )
-
-            normalized_action = result.get("_normalized_action", action)
 
             # Emit at most ONE screenshot per action result (prefer annotated)
             chosen = _choose_one_screenshot_path(
@@ -302,6 +543,31 @@ async def run_agent(conversation_id, prompt, settings):
                 "scroll",
             ):
                 agent.last_vision_data = None
+
+            is_stuck, stuck_reason = agent._is_stuck()
+            if is_stuck:
+                stuck_signals += 1
+                await emit_tool(step_id, f"Potential loop detected: {stuck_reason}", conversation_id)
+                agent.last_vision_data = None
+                if stuck_signals >= max_stuck_signals:
+                    reason = f"Blocked: {stuck_reason}"
+                    log_event(
+                        "run_blocked",
+                        conversation_id=conversation_id,
+                        step=step + 1,
+                        reason_code="stuck_loop",
+                        details=stuck_reason,
+                        stuck_signals=stuck_signals,
+                    )
+                    await emit_step(step_id, "Blocked", reason, conversation_id)
+                    agent.memory.add(
+                        "assistant",
+                        reason,
+                        {"step": step + 1, "status": "blocked", "reason": "stuck_loop"},
+                    )
+                    break
+            else:
+                stuck_signals = 0
 
             await asyncio.sleep(delay_after_action)
 
@@ -346,13 +612,14 @@ async def handler(websocket):
 
             elif msg_type == "stop":
                 stop_event.set()
+                log_event("stop_requested", conversation_id=payload.get("conversationId"))
                 # Cancel the running task so UI stops immediately (even mid-chunk / mid-wait).
                 if current_task and not current_task.done():
                     current_task.cancel()
                 await emit_status("idle")
 
     finally:
-        clients.remove(websocket)
+        clients.discard(websocket)
 
 
 async def main():

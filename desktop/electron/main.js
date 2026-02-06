@@ -223,10 +223,24 @@ app.on("before-quit", () => {
 ipcMain.handle("settings:get", async () => {
   const model = store.get("model", "claude-sonnet-4-5-20250929");
   const screenshotFrequency = store.get("screenshotFrequency", 2);
+  const verificationEveryNSteps = store.get("verificationEveryNSteps", screenshotFrequency);
   const saveScreenshots = store.get("saveScreenshots", true);
   const allowSendScreenshots = store.get("allowSendScreenshots", true);
   const dryRun = store.get("dryRun", false);
-  return { model, screenshotFrequency, saveScreenshots, allowSendScreenshots, dryRun };
+  const llmTimeoutSeconds = store.get("llmTimeoutSeconds", 60);
+  const maxStagnantSteps = store.get("maxStagnantSteps", 4);
+  const maxStuckSignals = store.get("maxStuckSignals", 2);
+  return {
+    model,
+    screenshotFrequency,
+    verificationEveryNSteps,
+    saveScreenshots,
+    allowSendScreenshots,
+    dryRun,
+    llmTimeoutSeconds,
+    maxStagnantSteps,
+    maxStuckSignals
+  };
 });
 
 ipcMain.handle("settings:set", async (_event, updates) => {
