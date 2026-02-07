@@ -9,34 +9,10 @@ An open-source desktop agent that can see your screen, reason about what’s on 
 - **Understand**: a vision-language model reasons over the annotated screenshot and chooses the next action.
 - **Interact**: the action layer executes clicks and keystrokes on the real desktop.
 
-Click **Get Started** to go to the main workspace.
-
-### 2. Main workspace
-
-![Nav main workspace](readme/Screenshot%202026-02-07%20at%203.47.06%E2%80%AFPM.png)
-
-Layout:
-
-| Region | Purpose |
-|--------|---------|
-| **Title bar** | Centered “Nav” branding; hamburger toggle for the sidebar; macOS traffic-light safe area. |
-| **Left sidebar** (resizable 240–420px, collapsible) | **New Chat** button; searchable conversation list; per-conversation delete; storage paths (conversations `.txt`, screenshots) with “Open folder” links; **Settings** at footer. The sidebar can be collapsed to icon-only for maximum screen real estate. |
-| **Header** | Active conversation title; **Running** / **Idle** status; vision mode badge (e.g. Fallback IDs, Raw Screenshot); **Stop** button when the agent is active. |
-| **Message thread** | User and assistant bubbles; streaming text; inline **ActivityTrace** with expandable step cards, thumbnails, and timestamps for each agent action. |
-| **Composer** | Model selector dropdown (Claude, GPT, Gemini, GLM); text input; **Send** / **Stop** button. Model can be switched without opening Settings. |
-
-Banners show WebSocket status and API key status. If the server is down or a key is missing, you'll see it there.
-
-### 3. ActivityTrace
-
-Each assistant response can include an **ActivityTrace**: a collapsible list of steps the agent performed. Each step shows a title, optional caption, and thumbnail grid of screenshots taken at that moment. Clicking a thumbnail opens the full **ImageViewer** for inspection. This is how you verify that the agent saw the right UI and took the intended action—no black box.
-
-
-## How it works
 
 The core loop: **perceive → reason → act → perceive again**. The flowchart below shows the full cycle. Images are in `readme/` and `mac_ui_outputs/`.
 
-### The flowchart — step by step
+### Steps
 
 <img src="readme/flowchart.png" width="280" alt="Nav flowchart" />
 
