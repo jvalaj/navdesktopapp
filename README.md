@@ -65,7 +65,7 @@ The core loop: **perceive → reason → act → perceive again**. The flowchart
 
 ### The flowchart — step by step
 
-![Nav flowchart](readme/flowchart.png)
+<img src="readme/flowchart.png" width="280" alt="Nav flowchart" />
 
 | Step | What happens |
 |------|--------------|
