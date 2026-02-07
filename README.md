@@ -31,26 +31,6 @@ Banners show WebSocket status and API key status. If the server is down or a key
 
 Each assistant response can include an **ActivityTrace**: a collapsible list of steps the agent performed. Each step shows a title, optional caption, and thumbnail grid of screenshots taken at that moment. Clicking a thumbnail opens the full **ImageViewer** for inspection. This is how you verify that the agent saw the right UI and took the intended action—no black box.
 
-### 4. Modals
-
-**Settings modal** — Model provider, model ID, API key status, screenshot frequency, verification cadence, dry-run toggle, LLM timeout, stagnation limits. All tuning parameters live in one place.
-
-**API key modal** — Shown when a provider (e.g. Anthropic, OpenAI) has no key configured:
-
-   ![Nav API key modal](readme/Screenshot%202026-02-07%20at%203.47.12%E2%80%AFPM.png)
-
-   Keys are sent to the Electron main process via a secure bridge; they are never logged or persisted in the renderer. Skip is available for users who will add keys later.
-
-**ImageViewer** — Full-screen screenshot viewer for debugging.
-
-### 5. Error handling
-
-- **Error boundary** — Catches crashes and shows a retry button.
-- **Toast notifications** — Success and error feedback.
-- **WebSocket reconnect** — Auto-retries with status in the banner.
-
----
-
 
 ## How it works
 
