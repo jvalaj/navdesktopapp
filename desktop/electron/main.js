@@ -9,7 +9,25 @@ const isDev = !app.isPackaged;
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const preloadPath = path.resolve(__dirname, "preload.cjs");
 const store = new Store({ name: "nav-ai" });
-const APIKEY_KEY = "anthropicApiKey";
+const APIKEY_KEYS = {
+  anthropic: "anthropicApiKey",
+  openai: "openaiApiKey",
+  gemini: "geminiApiKey",
+  zai: "zaiApiKey"
+};
+
+function normalizeProvider(provider) {
+  const p = String(provider || "anthropic").trim().toLowerCase();
+  if (p === "openai_compatible" || p === "local") return "openai";
+  if (p === "anthropic" || p === "openai" || p === "gemini" || p === "zai") return p;
+  return "anthropic";
+}
+
+function getApiKeyForProvider(provider) {
+  const normalized = normalizeProvider(provider);
+  const keyName = APIKEY_KEYS[normalized];
+  return keyName ? store.get(keyName) : "";
+}
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -58,12 +76,20 @@ async function startPythonServer() {
   if (pythonProc) return;
   const pythonPath = resolvePythonPath();
   const serverScript = resolveServerScript();
-  const apiKey = store.get(APIKEY_KEY);
+  const anthropicApiKey = getApiKeyForProvider("anthropic");
+  const openaiApiKey = getApiKeyForProvider("openai");
+  const geminiApiKey = getApiKeyForProvider("gemini");
+  const zaiApiKey = getApiKeyForProvider("zai");
   const { conversationsDir, screenshotsDir } = getStorageDirs();
   const env = {
     ...process.env,
     NAVAI_SERVER_PORT: String(serverPort),
-    ANTHROPIC_API_KEY: apiKey || "",
+    ANTHROPIC_API_KEY: anthropicApiKey || "",
+    claudekey: anthropicApiKey || "",
+    MODEL_API_KEY: openaiApiKey || "",
+    OPENAI_API_KEY: openaiApiKey || "",
+    GEMINI_API_KEY: geminiApiKey || "",
+    ZAI_API_KEY: zaiApiKey || "",
     NAVAI_CONVERSATIONS_DIR: conversationsDir,
     NAVAI_SCREENSHOTS_DIR: screenshotsDir
   };
@@ -222,6 +248,7 @@ app.on("before-quit", () => {
 
 ipcMain.handle("settings:get", async () => {
   const model = store.get("model", "claude-sonnet-4-5-20250929");
+  const modelProvider = store.get("modelProvider", "anthropic");
   const screenshotFrequency = store.get("screenshotFrequency", 2);
   const verificationEveryNSteps = store.get("verificationEveryNSteps", screenshotFrequency);
   const saveScreenshots = store.get("saveScreenshots", true);
@@ -232,6 +259,7 @@ ipcMain.handle("settings:get", async () => {
   const maxStuckSignals = store.get("maxStuckSignals", 2);
   return {
     model,
+    modelProvider,
     screenshotFrequency,
     verificationEveryNSteps,
     saveScreenshots,
@@ -251,22 +279,46 @@ ipcMain.handle("settings:set", async (_event, updates) => {
 });
 
 ipcMain.handle("apikey:get-status", async () => {
-  const key = store.get(APIKEY_KEY);
-  return { connected: Boolean(key) };
+  const anthropicConnected = Boolean(getApiKeyForProvider("anthropic"));
+  const openaiConnected = Boolean(getApiKeyForProvider("openai"));
+  const geminiConnected = Boolean(getApiKeyForProvider("gemini"));
+  const zaiConnected = Boolean(getApiKeyForProvider("zai"));
+  return {
+    connected: anthropicConnected || openaiConnected || geminiConnected || zaiConnected,
+    providers: {
+      anthropic: anthropicConnected,
+      openai: openaiConnected,
+      gemini: geminiConnected,
+      zai: zaiConnected
+    }
+  };
 });
 
-ipcMain.handle("apikey:set", async (_event, apiKey) => {
+ipcMain.handle("apikey:set", async (_event, payload) => {
   try {
+    let provider = "anthropic";
+    let apiKey = "";
+    if (typeof payload === "string") {
+      apiKey = payload;
+    } else {
+      provider = normalizeProvider(payload?.provider);
+      apiKey = payload?.key || "";
+    }
     if (!apiKey) return { ok: false, error: "Missing key" };
-    store.set(APIKEY_KEY, apiKey);
+    const keyName = APIKEY_KEYS[provider];
+    if (!keyName) return { ok: false, error: `Unsupported provider: ${provider}` };
+    store.set(keyName, apiKey);
     return { ok: true };
   } catch (err) {
     return { ok: false, error: String(err) };
   }
 });
 
-ipcMain.handle("apikey:clear", async () => {
-  store.delete(APIKEY_KEY);
+ipcMain.handle("apikey:clear", async (_event, provider = "anthropic") => {
+  const keyName = APIKEY_KEYS[normalizeProvider(provider)];
+  if (keyName) {
+    store.delete(keyName);
+  }
   return { ok: true };
 });
 

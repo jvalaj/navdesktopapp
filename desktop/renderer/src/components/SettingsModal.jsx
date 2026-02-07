@@ -2,6 +2,15 @@ import React, { useState } from "react";
 
 export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus, onAddApiKey }) {
   const [form, setForm] = useState(settings);
+  const provider = form.modelProvider || "anthropic";
+  const providerKeyConnected = Boolean(apiKeyStatus?.providers?.[provider]);
+  const providerLabel = provider === "anthropic"
+    ? "Anthropic Claude"
+    : provider === "openai"
+      ? "OpenAI ChatGPT"
+      : provider === "gemini"
+        ? "Google Gemini"
+        : "Z.ai GLM";
 
   const update = (key, value) => setForm((prev) => ({ ...prev, [key]: value }));
   const updateNumber = (key, value, min, max) => {
@@ -20,41 +29,57 @@ export default function SettingsModal({ settings, onClose, onSave, apiKeyStatus,
         <div style={{ 
           marginBottom: 24, 
           padding: 16, 
-          background: apiKeyStatus?.connected ? "rgba(152, 206, 0, 0.1)" : "rgba(201, 107, 107, 0.1)",
+          background: providerKeyConnected ? "rgba(152, 206, 0, 0.1)" : "rgba(201, 107, 107, 0.1)",
           borderRadius: 12,
-          border: `1px solid ${apiKeyStatus?.connected ? "rgba(152, 206, 0, 0.3)" : "rgba(201, 107, 107, 0.3)"}`
+          border: `1px solid ${providerKeyConnected ? "rgba(152, 206, 0, 0.3)" : "rgba(201, 107, 107, 0.3)"}`
         }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
             <div>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}>
-                API Key
+                API Key ({providerLabel})
               </div>
               <div style={{ fontSize: 12, color: "var(--muted)" }}>
-                {apiKeyStatus?.connected ? "API key is configured" : "API key not added"}
+                {providerKeyConnected ? "API key is configured" : "API key not added"}
               </div>
             </div>
-            {!apiKeyStatus?.connected && (
-              <button 
-                className="btn-primary" 
-                onClick={() => {
-                  onClose();
-                  onAddApiKey?.();
-                }}
-                style={{ padding: "8px 16px", fontSize: 13 }}
-              >
-                Add API Key
-              </button>
-            )}
+            <button
+              className="btn-primary"
+              onClick={() => {
+                onClose();
+                onAddApiKey?.(provider);
+              }}
+              style={{ padding: "8px 16px", fontSize: 13 }}
+            >
+              {providerKeyConnected ? "Update API Key" : "Add API Key"}
+            </button>
           </div>
         </div>
 
         <div className="settings-grid">
           <label>
-            Model
-            <select value={form.model} onChange={(e) => update("model", e.target.value)}>
-              <option value="claude-sonnet-4-5-20250929">Claude Sonnet 4.5</option>
-              <option value="claude-opus-4-5-20250929">Claude Opus 4.5</option>
+            Model Provider
+            <select value={provider} onChange={(e) => update("modelProvider", e.target.value)}>
+              <option value="anthropic">Anthropic Claude</option>
+              <option value="openai">OpenAI ChatGPT</option>
+              <option value="gemini">Google Gemini</option>
+              <option value="zai">Z.ai GLM</option>
             </select>
+          </label>
+          <label>
+            Model
+            <input
+              value={form.model || ""}
+              onChange={(e) => update("model", e.target.value)}
+              placeholder={
+                provider === "anthropic"
+                  ? "claude-sonnet-4-5-20250929"
+                  : provider === "openai"
+                    ? "gpt-5.2"
+                    : provider === "gemini"
+                      ? "gemini-3-flash-preview"
+                      : "glm-4.7"
+              }
+            />
           </label>
           <label>
             Save Screenshots

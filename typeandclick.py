@@ -7,6 +7,7 @@ import pyautogui
 import time
 from typing import Optional
 from enum import Enum
+import argparse
 
 # Safety settings
 pyautogui.FAILSAFE = True  # Move mouse to corner to abort
@@ -15,6 +16,26 @@ pyautogui.PAUSE = 0.1  # Small pause between actions
 def _get_screen_size():
     """Get current screen dimensions (refresh each call to avoid stale sizes)."""
     return pyautogui.size()
+
+def _screen_ready() -> tuple[bool, int, int, str]:
+    """
+    Best-effort check that pyautogui has access to a real display.
+
+    On headless/locked-down environments, pyautogui.size() may return (0, 0),
+    and some calls (like position()/moveTo()/click()) can error or crash.
+    """
+    w, h = _get_screen_size()
+    w_i, h_i = int(w), int(h)
+    if w_i <= 0 or h_i <= 0:
+        return (
+            False,
+            w_i,
+            h_i,
+            "No accessible display detected (screen size reported as 0x0). "
+            "Run from an interactive desktop session and ensure Accessibility "
+            "permissions are granted to your terminal/Python.",
+        )
+    return True, w_i, h_i, ""
 
 
 class ClickType(Enum):
@@ -52,9 +73,12 @@ def click_at(
         click_at(100, 200, "right", 1)  # Right click
     """
     try:
+        ready, screen_w, screen_h, why = _screen_ready()
+        if not ready:
+            return {"success": False, "error": why}
+
         # Normalize and validate coordinates without clamping.
         # Rejecting invalid clicks is safer than silently clicking screen edges.
-        screen_w, screen_h = _get_screen_size()
         max_x = max(0, int(screen_w) - 1)
         max_y = max(0, int(screen_h) - 1)
         x = int(round(float(x)))
@@ -196,8 +220,11 @@ def drag_to(
         dict with status and message
     """
     try:
+        ready, screen_w, screen_h, why = _screen_ready()
+        if not ready:
+            return {"success": False, "error": why}
+
         # Validate coordinates
-        screen_w, screen_h = _get_screen_size()
         max_x = max(0, int(screen_w) - 1)
         max_y = max(0, int(screen_h) - 1)
         start_x = int(round(float(start_x)))
@@ -390,6 +417,10 @@ def get_mouse_position() -> dict:
         dict with x, y coordinates
     """
     try:
+        ready, _screen_w, _screen_h, why = _screen_ready()
+        if not ready:
+            return {"success": False, "error": why}
+
         x, y = pyautogui.position()
         return {
             "success": True,
@@ -452,22 +483,59 @@ Example tool definition for LLM:
 
 
 if __name__ == "__main__":
-    # Example usage and testing
-    print("Testing mouse and keyboard functions...")
-    print(f"Screen size: {get_screen_size()}")
+    parser = argparse.ArgumentParser(
+        description="Mouse/keyboard helpers for macOS (pyautogui).",
+    )
+    sub = parser.add_subparsers(dest="cmd")
 
-    # Example: Get mouse position
-    print(f"\n{get_mouse_position()}")
+    click_p = sub.add_parser("click", help="Click at screen coordinates.")
+    click_p.add_argument("x", type=float, help="X coordinate (pixels from left).")
+    click_p.add_argument("y", type=float, help="Y coordinate (pixels from top).")
+    click_p.add_argument(
+        "--button",
+        default="left",
+        choices=["left", "right", "middle"],
+        help="Mouse button to click.",
+    )
+    click_p.add_argument("--clicks", type=int, default=1, help="Number of clicks.")
+    click_p.add_argument("--duration", type=float, default=0.0, help="Click duration.")
+    click_p.add_argument(
+        "--move-delay",
+        type=float,
+        default=0.0,
+        help="Move duration before clicking.",
+    )
+    click_p.add_argument(
+        "--delay",
+        type=float,
+        default=0.0,
+        help="Wait N seconds before executing (gives you time to focus a window).",
+    )
 
-    # Example: Click
-    # print(left_click(500, 500))
+    sub.add_parser("pos", help="Print current mouse position.")
+    sub.add_parser("screen", help="Print screen size.")
 
-    # Example: Type text
-    # print(type_text("Hello, World!"))
+    args = parser.parse_args()
 
-    # Example: Press key
-    # print(press_key("enter"))
-
-    print("\nAll functions loaded successfully!")
-    print("\nNote: To use these functions, install pyautogui:")
-    print("  pip install pyautogui")
+    if not args.cmd:
+        print("Testing mouse and keyboard functions...")
+        print(f"Screen size: {get_screen_size()}")
+        print(f"\n{get_mouse_position()}")
+        print("\nAll functions loaded successfully!")
+    elif args.cmd == "pos":
+        print(get_mouse_position())
+    elif args.cmd == "screen":
+        print(get_screen_size())
+    elif args.cmd == "click":
+        if args.delay > 0:
+            time.sleep(args.delay)
+        print(
+            click_at(
+                args.x,
+                args.y,
+                click_type=args.button,
+                clicks=args.clicks,
+                duration=args.duration,
+                move_delay=args.move_delay,
+            )
+        )

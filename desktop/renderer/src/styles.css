@@ -1138,6 +1138,41 @@ body,
   font-weight: 500;
 }
 
+.header-status-wrap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mode-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  border: 1px solid transparent;
+}
+
+.mode-raw_screenshot_only {
+  background: rgba(0, 101, 61, 0.08);
+  color: #005f3a;
+  border-color: rgba(0, 101, 61, 0.24);
+}
+
+.mode-fallback_with_element_ids {
+  background: rgba(140, 76, 0, 0.10);
+  color: #7a4300;
+  border-color: rgba(140, 76, 0, 0.24);
+}
+
+.mode-unknown {
+  background: rgba(0, 0, 0, 0.06);
+  color: #4c525d;
+  border-color: rgba(0, 0, 0, 0.12);
+}
+
 .thread {
   flex: 1;
   overflow: auto;
@@ -1381,6 +1416,97 @@ body,
   color: var(--muted);
   text-align: right;
   font-weight: 500;
+}
+
+/* Model Selector */
+.model-selector-wrapper {
+  position: absolute;
+  left: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  z-index: 20;
+}
+
+.model-selector-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  background: rgba(255, 255, 255, 0.4);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.model-selector-btn:hover {
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.model-menu {
+  position: absolute;
+  bottom: 100%;
+  left: 0;
+  margin-bottom: 12px;
+  background: rgba(43, 48, 59, 0.95);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 16px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: max-content;
+  min-width: 180px;
+  max-height: 400px;
+  overflow-y: auto;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.05);
+  transform-origin: bottom left;
+  animation: scaleIn 0.15s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+@keyframes scaleIn {
+  from { opacity: 0; transform: scale(0.95) translateY(4px); }
+  to { opacity: 1; transform: scale(1) translateY(0); }
+}
+
+.model-option {
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  transition: all 0.15s ease;
+  font-weight: 500;
+}
+
+.model-option:hover {
+  background: rgba(255, 255, 255, 0.1);
+  color: #fff;
+}
+
+.model-option.active {
+  background: var(--primary);
+  color: var(--primary-text);
+}
+
+.check-icon {
+  opacity: 0.8;
+}
+
+/* Adjust input padding to make room for left button */
+.composer input {
+  padding-left: 56px; /* 6px (left-pos) + 44px (btn-width) + 6px (gap) */
 }
 
 /* Glass Modal */

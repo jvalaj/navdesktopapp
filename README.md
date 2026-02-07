@@ -37,3 +37,38 @@ CLI example:
 
 Run tests:
 - `python3 -m unittest discover -s tests -p "test*.py" -v`
+
+## Clean architecture (simple)
+
+Runtime flow:
+
+`[Screen] -> [Screenshot] -> [User-selected model] -> [Structured action JSON] -> [Nav action engine] -> [Mouse/Keyboard/OS]`
+
+- `agent.py` handles:
+  - screenshot capture
+  - model decision calls
+  - action JSON parsing/normalization
+  - dispatch to `typeandclick.py`
+- `typeandclick.py` is model-agnostic execution (click/type/scroll/keys).
+- `agent_server.py` passes model settings from UI/API to `Agent`.
+- `vision.py` remains optional fallback/context and also supports provider selection for VLM detection.
+
+### Model selection (decision model)
+
+`agent_server.py` / websocket `settings` can now include:
+
+- `model`: model name
+- `modelProvider`: `anthropic` or `openai_compatible`
+- `modelBaseUrl`: base URL for local OpenAI-compatible servers (examples: Ollama/vLLM/LM Studio)
+- `modelApiKey`: optional API key for provider
+- `llmTimeoutSeconds`: request timeout
+
+Default behavior is unchanged: Anthropic model with existing env key.
+
+### Local model examples
+
+- Ollama compatible endpoint: `http://127.0.0.1:11434/v1`
+- LM Studio compatible endpoint: `http://127.0.0.1:1234/v1`
+- vLLM OpenAI endpoint: `http://127.0.0.1:8000/v1`
+
+Use `modelProvider=openai_compatible` with your chosen `modelBaseUrl`.

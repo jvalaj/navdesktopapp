@@ -1,10 +1,24 @@
 import React, { useState, useEffect } from "react";
 
-export default function ApiKeyModal({ onSaved, onSkip }) {
+export default function ApiKeyModal({ provider = "anthropic", onSaved, onSkip }) {
   const [key, setKey] = useState("");
   const [error, setError] = useState("");
   const [skipped, setSkipped] = useState(false);
   const [bridgeAvailable, setBridgeAvailable] = useState(!!window.navai?.apiKeySet);
+  const providerLabel = provider === "anthropic"
+    ? "Anthropic Claude"
+    : provider === "openai"
+      ? "OpenAI ChatGPT"
+      : provider === "gemini"
+        ? "Google Gemini"
+        : "Z.ai GLM";
+  const placeholder = provider === "anthropic"
+    ? "sk-ant-..."
+    : provider === "openai"
+      ? "sk-..."
+      : provider === "gemini"
+        ? "AIza..."
+        : "Your Z.ai token";
 
   // Check if bridge is available when component mounts
   useEffect(() => {
@@ -63,14 +77,14 @@ export default function ApiKeyModal({ onSaved, onSkip }) {
     
     try {
       console.log("Attempting to save API key...");
-      const result = await window.navai.apiKeySet(key.trim());
+      const result = await window.navai.apiKeySet({ provider, key: key.trim() });
       console.log("API key save result:", result);
       
       if (result?.ok) {
         console.log("API key saved successfully, restarting Python...");
         await window.navai?.pythonRestart();
         console.log("Python restarted, calling onSaved callback");
-        onSaved?.();
+        onSaved?.(provider);
       } else {
         const errorMsg = result?.error || "Could not save key";
         console.error("Failed to save API key:", errorMsg);
@@ -92,13 +106,15 @@ export default function ApiKeyModal({ onSaved, onSkip }) {
   return (
     <div className="modal-backdrop">
       <div className="modal">
-        <h3>Enter your Anthropic API key</h3>
+        <h3>
+          Enter your {providerLabel} API key
+        </h3>
         <p style={{ color: "#93B48B", fontSize: 13 }}>
-          Your key is stored securely in the OS keychain. It is never shipped or hardcoded.
+          Your key is stored locally on this machine and never shipped or hardcoded.
         </p>
         <input
           type="password"
-          placeholder="sk-ant-..."
+          placeholder={placeholder}
           value={key}
           onChange={(e) => setKey(e.target.value)}
           onKeyDown={(e) => {

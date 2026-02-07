@@ -18,6 +18,9 @@ from anthropic import Anthropic
 
 PORT = int(os.environ.get("NAVAI_SERVER_PORT", "8765"))
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("MODEL_API_KEY")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+ZAI_API_KEY = os.environ.get("ZAI_API_KEY")
 SCREENSHOTS_DIR = (os.environ.get("NAVAI_SCREENSHOTS_DIR") or "").strip()
 
 clients = set()
@@ -129,6 +132,17 @@ async def emit_tool(step_id, caption=None, conversation_id=None):
     await broadcast(payload)
 
 
+async def emit_decision_mode(mode, conversation_id=None):
+    payload = {
+        "type": "decision_mode",
+        "mode": mode,
+        "timestamp": now_ts(),
+    }
+    if conversation_id is not None:
+        payload["conversationId"] = conversation_id
+    await broadcast(payload)
+
+
 async def emit_message_delta(message_id, role, text, conversation_id=None):
     payload = {
         "type": "message_delta",
@@ -209,9 +223,27 @@ async def run_agent(conversation_id, prompt, settings):
     assistant_message_id = str(uuid.uuid4())
     try:
         # Persist the conversation immediately, even if the run is stopped very early.
+        model_provider = settings.get("modelProvider", os.environ.get("NAVAI_MODEL_PROVIDER", "anthropic"))
+        model_base_url = settings.get("modelBaseUrl", os.environ.get("MODEL_BASE_URL"))
+        provider_name = str(model_provider or "anthropic").strip().lower()
+        if provider_name in ("openai_compatible", "local"):
+            provider_name = "openai"
+        if provider_name == "openai":
+            fallback_api_key = OPENAI_API_KEY
+        elif provider_name == "gemini":
+            fallback_api_key = GEMINI_API_KEY
+        elif provider_name == "zai":
+            fallback_api_key = ZAI_API_KEY
+        else:
+            fallback_api_key = API_KEY
+        model_api_key = settings.get("modelApiKey") or fallback_api_key
+        model_timeout_seconds = float(settings.get("llmTimeoutSeconds", 60))
         agent = Agent(
-            api_key=API_KEY,
+            api_key=model_api_key,
             model=settings.get("model", "claude-sonnet-4-5-20250929"),
+            model_provider=model_provider,
+            model_base_url=model_base_url,
+            model_timeout_s=model_timeout_seconds,
             conversation_id=conversation_id,
             thinking_enabled=True,
         )
@@ -220,7 +252,7 @@ async def run_agent(conversation_id, prompt, settings):
         delay_after_action = settings.get("delay", 0.5)
         allow_send_screenshots = settings.get("allowSendScreenshots", True)
         dry_run = settings.get("dryRun", False)
-        llm_timeout_seconds = float(settings.get("llmTimeoutSeconds", 60))
+        llm_timeout_seconds = float(settings.get("llmTimeoutSeconds", model_timeout_seconds))
         verification_every_n_steps = max(
             1,
             int(
@@ -234,6 +266,7 @@ async def run_agent(conversation_id, prompt, settings):
         max_stuck_signals = settings.get("maxStuckSignals", 2)
         no_advance_checks = 0
         stuck_signals = 0
+        fallback_steps_remaining = 0
         verifier_recovery_attempts = 0
         max_verifier_recovery_attempts = 3
         latest_verifier_feedback = None
@@ -314,12 +347,20 @@ async def run_agent(conversation_id, prompt, settings):
             # Always refresh vision per step so IDs and OCR reflect the current UI.
             await emit_step(step_id, "Taking screenshot and analyzing UI")
             vision_data = agent.run_vision_analysis()
-            screenshot_to_show = vision_data.get("annotated")
+            allow_element_fallback = fallback_steps_remaining > 0
+            raw_screenshot = vision_data.get("screenshot")
+            annotated_screenshot = vision_data.get("annotated")
+            screenshot_to_show = annotated_screenshot if allow_element_fallback else raw_screenshot
             vision_summary = agent.get_ui_summary(vision_data.get("boxes", []))
+            llm_vision_summary = vision_summary if allow_element_fallback else None
+            await emit_decision_mode(
+                "fallback_with_element_ids" if allow_element_fallback else "raw_screenshot_only",
+                conversation_id,
+            )
             # Emit only ONE screenshot (prefer annotated)
             chosen = _choose_one_screenshot_path(
-                primary=vision_data.get("annotated"),
-                secondary=vision_data.get("screenshot"),
+                primary=screenshot_to_show,
+                secondary=raw_screenshot,
             )
             if chosen:
                 await emit_screenshot(step_id, chosen, "Screen snapshot", conversation_id)
@@ -354,6 +395,7 @@ async def run_agent(conversation_id, prompt, settings):
                         if forced_recovery_decision and verifier_recovery_attempts < max_verifier_recovery_attempts:
                             verifier_recovery_attempts += 1
                             no_advance_checks = 0
+                            fallback_steps_remaining = max(fallback_steps_remaining, 2)
                             await emit_tool(
                                 step_id,
                                 (
@@ -399,8 +441,9 @@ async def run_agent(conversation_id, prompt, settings):
                             agent.get_llm_decision,
                             prompt,
                             screenshot_path=screenshot_to_show,
-                            vision_summary=vision_summary,
+                            vision_summary=llm_vision_summary,
                             verifier_feedback=latest_verifier_feedback,
+                            allow_element_fallback=allow_element_fallback,
                         ),
                         timeout=max(5.0, llm_timeout_seconds),
                     )
@@ -549,6 +592,7 @@ async def run_agent(conversation_id, prompt, settings):
                 stuck_signals += 1
                 await emit_tool(step_id, f"Potential loop detected: {stuck_reason}", conversation_id)
                 agent.last_vision_data = None
+                fallback_steps_remaining = max(fallback_steps_remaining, 2)
                 if stuck_signals >= max_stuck_signals:
                     reason = f"Blocked: {stuck_reason}"
                     log_event(
@@ -570,6 +614,8 @@ async def run_agent(conversation_id, prompt, settings):
                 stuck_signals = 0
 
             await asyncio.sleep(delay_after_action)
+            if fallback_steps_remaining > 0:
+                fallback_steps_remaining -= 1
 
         # Log final conversation save status
         if agent is not None:
