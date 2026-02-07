@@ -209,3 +209,9 @@ python3 -m unittest discover -s tests -p "test*.py" -v
 - It can misclick, so do not use it on sensitive tasks
 - Vision quality depends on the model and your screen
 - It is a toy, but it is a fun and useful one
+
+---
+
+![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)
+![macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)
+![Open Source](https://img.shields.io/badge/Open%20Source-Yes-green.svg)
