@@ -1,74 +1,151 @@
 # Nav (v1)
 
+Hey, this is a simple attempt at making a Mac feel a little more programmable. The idea is super basic: take a screenshot, let a model describe what it sees, and then do real mouse and keyboard actions on your laptop. It is not magic or perfect. It is just a scrappy project that tries to automate small tasks on a real Mac screen.
+
+If you have ever wanted a bot that can click around the UI like a person, this is my first pass.
+
+## What this project is
+
+- A tiny desktop app with a chat UI
+- A Python agent that sees the screen and decides what to do
+- A vision pipeline that finds clickable UI elements
+- A real action layer that clicks and types on macOS
+
+## What it is not
+
+- A production ready automation system
+- A guaranteed reliable agent
+- A full OS replacement
+
+## Quick mental model
+
+Think of it like this:
+
+1. You say the goal in the UI
+2. The agent takes a screenshot
+3. The model decides the next action
+4. The action layer clicks or types
+5. Repeat until done or stopped
+
+In plain words, it is just a loop of screenshot then think then act.
+
 ## Project structure
 
-The app uses **both** the `desktop/` folder and the **v1 root** (this folder):
+The app uses both the desktop folder and the v1 root folder.
 
 | Location | Role |
-|----------|------|
-| **desktop/** | Electron app: main process, renderer (React UI), preload. This is what you run with `npm run dev` or the packaged app. |
-| **v1 root** | Python backend: the Electron app spawns `agent_server.py` from here. The server uses `agent.py`, `vision.py`, and `typeandclick.py` (all in v1 root). |
+| --- | --- |
+| desktop/ | Electron app with the React UI, preload, and main process. This is the app you run. |
+| v1 root | Python backend. The Electron app starts agent_server.py, which uses agent.py, vision.py, and typeandclick.py. |
 
-When you launch the app, Electron starts the Python server via `path.resolve(app.getAppPath(), "..", "agent_server.py")`, so the agent and vision code in the v1 folder are required for the app to work.
+When you launch the app, Electron starts the Python server using the v1 root path. If the Python files are missing, the UI will not work.
 
-## Vision precision on macOS (recommended)
+## How it works, for real
 
-`vision.py` now supports a **VLM-first** backend for UI element detection from screenshots. It uses a vision model to semantically detect UI controls, then applies deterministic anti-hallucination filters before returning clickable boxes.
+### 1. The UI and server handshake
 
-The parse order in `auto` mode is:
-1. VLM detection (`source=vlm`)
-2. CV fallback/supplement (`source=cv`) when VLM is weak or supplement is enabled
+The React UI connects to a local WebSocket at ws://127.0.0.1:8765 and streams in steps. The Python server emits status updates, text deltas, and screenshots as the agent works.
 
-### Controls
+### 2. The agent loop
 
-Environment variables:
-- `VISION_BACKEND=auto|vlm|cv` (default `auto`)
-- `VISION_USE_VLM=1` enables model-based screenshot detection (default `1`)
-- `VISION_VLM_MODEL=claude-sonnet-4-5-20250929` model used for VLM detection
-- `VISION_VLM_TIMEOUT=10.0` timeout (seconds) for VLM API call
-- `VISION_STRICT=1` to prefer fewer, more-clickable elements (default `1`)
-- `VISION_MAX_BOXES=220` cap output count (default `220`)
-- `VISION_MIN_SCORE=0.70` CV threshold (default `0.70`)
-- `VISION_CV_SUPPLEMENT=1` to add CV boxes even when VLM is available (default `0`)
+agent.py owns the main loop. Every step it:
 
-CLI example:
-- `python3 vision.py --image /path/to/screenshot.png --backend auto --strict`
-- `python3 vision.py --image /path/to/screenshot.png --backend vlm --strict --vlm_model claude-sonnet-4-5-20250929`
+- Takes a screenshot
+- Runs vision if needed
+- Builds a prompt for the model
+- Parses the action JSON
+- Calls typeandclick.py to execute the action
 
-Run tests:
-- `python3 -m unittest discover -s tests -p "test*.py" -v`
+### 3. The vision pipeline
 
-## Clean architecture (simple)
+vision.py is a mix of semantic detection and classical CV. In auto mode it tries a VLM first, then falls back to CV if needed. It also annotates a screenshot with element IDs so the model can point to a target instead of guessing coordinates.
 
-Runtime flow:
+You will see this kind of annotated output in the UI and in the sample files below.
 
-`[Screen] -> [Screenshot] -> [User-selected model] -> [Structured action JSON] -> [Nav action engine] -> [Mouse/Keyboard/OS]`
+![Annotated UI example](readme/test2_ui_everything_annotated.png)
 
-- `agent.py` handles:
-  - screenshot capture
-  - model decision calls
-  - action JSON parsing/normalization
-  - dispatch to `typeandclick.py`
-- `typeandclick.py` is model-agnostic execution (click/type/scroll/keys).
-- `agent_server.py` passes model settings from UI/API to `Agent`.
-- `vision.py` remains optional fallback/context and also supports provider selection for VLM detection.
+### 4. The action layer
 
-### Model selection (decision model)
+typeandclick.py is the boring but important part. It uses pyautogui to click, type, scroll, and press keys. It also checks screen size and fails safely if the display is not available.
 
-`agent_server.py` / websocket `settings` can now include:
+## Visuals from this repo
 
-- `model`: model name
-- `modelProvider`: `anthropic` or `openai_compatible`
-- `modelBaseUrl`: base URL for local OpenAI-compatible servers (examples: Ollama/vLLM/LM Studio)
-- `modelApiKey`: optional API key for provider
-- `llmTimeoutSeconds`: request timeout
+These are real files generated by the vision pipeline and included here so you can see what the agent actually sees.
 
-Default behavior is unchanged: Anthropic model with existing env key.
+![Flowchart](readme/flowchart.png)
 
-### Local model examples
+![Another annotated UI example](mac_ui_outputs/test_ui_everything_annotated.png)
 
-- Ollama compatible endpoint: `http://127.0.0.1:11434/v1`
-- LM Studio compatible endpoint: `http://127.0.0.1:1234/v1`
-- vLLM OpenAI endpoint: `http://127.0.0.1:8000/v1`
+The JSON files next to those images include the raw box data and labels.
 
-Use `modelProvider=openai_compatible` with your chosen `modelBaseUrl`.
+## Why this exists
+
+I am trying to do a small and honest version of computer use automation. A lot of research projects look impressive, but they are often tuned for benchmarks. Here I just want something that works on my laptop, even if it is messy.
+
+## How this compares to OSWorld and UI-TARS
+
+This is the part where I try to be real about scope.
+
+- OSWorld is a benchmark suite. It measures how well agents complete tasks on a fixed set of apps and goals. It is good for research comparison but it is not focused on your actual laptop setup.
+- UI-TARS focuses on dataset driven UI reasoning and structured actions. It is more about training and evaluation of UI actions than building a simple local tool.
+
+This project is smaller. It is more like a personal lab tool. The point is not to win a benchmark. The point is to automate small tasks on macOS and learn what breaks.
+
+## Running it locally
+
+You need both the Python backend and the Electron app.
+
+1. Install Python deps in v1 root
+
+```
+pip install -r requirements.txt
+```
+
+2. Install desktop app deps
+
+```
+cd desktop
+npm install
+```
+
+3. Run the app
+
+```
+npm run dev
+```
+
+If the UI says it cannot reach the agent server, make sure the Python server can import websockets and that agent_server.py is in the v1 root.
+
+## Useful files to read
+
+- agent_server.py - WebSocket server and run loop orchestration
+- agent.py - main agent logic and memory
+- vision.py - UI detection and annotation
+- typeandclick.py - mouse and keyboard actions
+- desktop/ - Electron app and React UI
+
+## Model settings
+
+The app supports multiple model providers and local OpenAI compatible servers.
+
+- modelProvider can be anthropic, openai_compatible, gemini, or zai
+- modelBaseUrl can point to Ollama, LM Studio, or vLLM
+
+Examples of local endpoints:
+
+- http://127.0.0.1:11434/v1 for Ollama
+- http://127.0.0.1:1234/v1 for LM Studio
+- http://127.0.0.1:8000/v1 for vLLM
+
+## Tests
+
+```
+python3 -m unittest discover -s tests -p "test*.py" -v
+```
+
+## Notes and limitations
+
+- This is macOS only right now
+- It can misclick, so do not use it on sensitive tasks
+- Vision quality depends on the model and your screen
+- It is a toy, but it is a fun and useful one
