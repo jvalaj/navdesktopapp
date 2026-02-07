@@ -2,13 +2,6 @@
 
 An open-source desktop agent that can see your screen, reason about what’s on it, and perform real actions on macOS.
 
-## App walkthrough
-
-Nav has a desktop app with a chat UI that lets you give goals to the agent and watch what it does.
-
-### 1. Landing screen
-
-On launch, you see a full-screen intro:
 
 ![Nav landing screen](readme/Screenshot%202026-02-07%20at%203.46.51%E2%80%AFPM.png)
 
