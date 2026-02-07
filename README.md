@@ -5,6 +5,21 @@
 - A vision pipeline that finds clickable UI elements
 - A real action layer that clicks and types on macOS
 
+## App walkthrough (actual UI)
+
+Below is a simple sequence of what the app looks like in practice:
+
+1. **Landing screen** (`See -> Understand -> Interact`)
+
+   ![Nav landing screen](readme/Screenshot%202026-02-07%20at%203.46.51%E2%80%AFPM.png)
+
+2. **Main workspace** (chat pane + status + input bar)
+
+   ![Nav main workspace](readme/Screenshot%202026-02-07%20at%203.47.06%E2%80%AFPM.png)
+
+3. **Secure key entry modal** (shown when provider key is missing)
+
+   ![Nav API key modal](readme/Screenshot%202026-02-07%20at%203.47.12%E2%80%AFPM.png)
 
 <table>
 	<tr>
