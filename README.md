@@ -5,49 +5,109 @@
 - A vision pipeline that finds clickable UI elements
 - A real action layer that clicks and types on macOS
 
-## App walkthrough (actual UI)
+## App walkthrough
 
-Below is a simple sequence of what the app looks like in practice:
+Nav has a desktop app with a chat UI that lets you give goals to the agent and watch what it does.
 
-1. **Landing screen** (`See -> Understand -> Interact`)
+### 1. Landing screen
 
-   ![Nav landing screen](readme/Screenshot%202026-02-07%20at%203.46.51%E2%80%AFPM.png)
+On launch, you see a full-screen intro:
 
-2. **Main workspace** (chat pane + status + input bar)
+![Nav landing screen](readme/Screenshot%202026-02-07%20at%203.46.51%E2%80%AFPM.png)
 
-   ![Nav main workspace](readme/Screenshot%202026-02-07%20at%203.47.06%E2%80%AFPM.png)
+- **See**: the agent captures the screen and finds clickable UI elements.
+- **Understand**: a vision-language model reasons over the annotated screenshot and chooses the next action.
+- **Interact**: the action layer executes clicks and keystrokes on the real desktop.
 
-3. **Secure key entry modal** (shown when provider key is missing)
+Click **Get Started** to go to the main workspace.
+
+### 2. Main workspace
+
+![Nav main workspace](readme/Screenshot%202026-02-07%20at%203.47.06%E2%80%AFPM.png)
+
+Layout:
+
+| Region | Purpose |
+|--------|---------|
+| **Title bar** | Centered “Nav” branding; hamburger toggle for the sidebar; macOS traffic-light safe area. |
+| **Left sidebar** (resizable 240–420px, collapsible) | **New Chat** button; searchable conversation list; per-conversation delete; storage paths (conversations `.txt`, screenshots) with “Open folder” links; **Settings** at footer. The sidebar can be collapsed to icon-only for maximum screen real estate. |
+| **Header** | Active conversation title; **Running** / **Idle** status; vision mode badge (e.g. Fallback IDs, Raw Screenshot); **Stop** button when the agent is active. |
+| **Message thread** | User and assistant bubbles; streaming text; inline **ActivityTrace** with expandable step cards, thumbnails, and timestamps for each agent action. |
+| **Composer** | Model selector dropdown (Claude, GPT, Gemini, GLM); text input; **Send** / **Stop** button. Model can be switched without opening Settings. |
+
+Banners show WebSocket status and API key status. If the server is down or a key is missing, you'll see it there.
+
+### 3. ActivityTrace
+
+Each assistant response can include an **ActivityTrace**: a collapsible list of steps the agent performed. Each step shows a title, optional caption, and thumbnail grid of screenshots taken at that moment. Clicking a thumbnail opens the full **ImageViewer** for inspection. This is how you verify that the agent saw the right UI and took the intended action—no black box.
+
+### 4. Modals
+
+**Settings modal** — Model provider, model ID, API key status, screenshot frequency, verification cadence, dry-run toggle, LLM timeout, stagnation limits. All tuning parameters live in one place.
+
+**API key modal** — Shown when a provider (e.g. Anthropic, OpenAI) has no key configured:
 
    ![Nav API key modal](readme/Screenshot%202026-02-07%20at%203.47.12%E2%80%AFPM.png)
 
-<table>
-	<tr>
-		<td>
-			<img src="readme/flowchart.png" width="360" alt="Nav flowchart" />
-		</td>
-		<td>
-			<strong>What this flowchart means</strong><br />
-			It is the core loop. A user goal goes in, the agent grabs a screenshot,
-			runs vision to find clickable UI parts, asks the model for the next action,
-			then uses the action layer to click or type. After each step it loops and
-			checks the screen again. The whole system is just this loop over and over.
-		</td>
-	</tr>
-</table>
+   Keys are sent to the Electron main process via a secure bridge; they are never logged or persisted in the renderer. Skip is available for users who will add keys later.
+
+**ImageViewer** — Full-screen screenshot viewer for debugging.
+
+### 5. Error handling
+
+- **Error boundary** — Catches crashes and shows a retry button.
+- **Toast notifications** — Success and error feedback.
+- **WebSocket reconnect** — Auto-retries with status in the banner.
+
+---
+
+
+## How it works
+
+The core loop: **perceive → reason → act → perceive again**. The flowchart below shows the full cycle. Images are in `readme/` and `mac_ui_outputs/`.
+
+### The flowchart — step by step
+
+![Nav flowchart](readme/flowchart.png)
+
+| Step | What happens |
+|------|--------------|
+| **1. User prompt** | The user types a goal (e.g. "Open Notes and create a new note") into the Nav composer. The goal is sent over WebSocket to the Python backend. |
+| **2. Screenshot** | `agent.py` captures the current screen with `pyautogui.screenshot()`. The image is saved to disk (e.g. `screenshots/screenshot_20240207_101230.png`). |
+| **3. Vision processing** | `vision.py` analyzes the screenshot. In auto mode it uses a VLM first, then falls back to classical CV if needed. It detects buttons, links, inputs, menus, and other interactive elements. |
+| **4. JSON + annotated screenshot** | The vision pipeline outputs two artifacts: a structured JSON of element boxes (id, type, label, bounding box, click coordinates), and an annotated image with numbered IDs overlaid so the LLM can refer to elements by ID. |
+| **5. Feed to multimodal LLM** | The agent builds a prompt containing the user goal, the annotated screenshot, and the box metadata. The LLM sees both the pixels and the structured list—no coordinate guessing. |
+| **6. LLM decides next action** | The model outputs a JSON action: `{ "action": "click", "element_id": 42 }` or `{ "action": "type", "text": "Hello" }`. It chooses based on what it sees and the task. |
+| **7. Type & Click script** | `typeandclick.py` maps element IDs to screen coordinates, applies scale factors for Retina displays, and prepares the concrete mouse/keyboard commands. |
+| **8. Action performed** | PyAutoGUI executes the click or keystroke on the real desktop. The user sees the action happen. |
+| **9. Screenshot again** | Another screenshot is taken to capture the result. The loop repeats. |
+| **10. Task achieved?** | The agent (and optionally the model) evaluates whether the goal is done. If not, it loops back to step 3. If yes, it returns a summary to the UI and stops. |
+
+The React UI streams this loop in real time: each step, screenshot, and action appears in the ActivityTrace so you can see exactly what the agent did.
+
+### The vision output — what the model sees
+
+The annotated screenshots are what the LLM receives. Each interactive element gets a bounding box and an ID. The model says "click element 12" instead of "click at (1082, 932)"—which is more reliable across resolutions and layouts.
 
 <table>
 	<tr>
 		<td>
-			<img src="readme/test2_ui_everything_annotated.png" width="360" alt="Annotated UI example" />
+			<img src="readme/test2_ui_everything_annotated.png" width="360" alt="Annotated UI — vision pipeline output" />
 		</td>
 		<td>
 			<img src="mac_ui_outputs/test_ui_everything_annotated.png" width="360" alt="Another annotated UI example" />
 		</td>
 	</tr>
+	<tr>
+		<td colspan="2" style="padding-top: 8px; font-size: 13px; color: #666;">
+			<strong>What you're seeing:</strong> The raw screenshot with bounding boxes and IDs overlaid. Each box corresponds to a detected UI element. The companion JSON files (<code>test2_ui_everything.json</code>, <code>test_ui_everything.json</code>) contain the exact coordinates and labels.
+		</td>
+	</tr>
 </table>
 
-The JSON files next to those images include the raw box data and labels. Tiny example:
+### The box schema — structured UI representation
+
+The vision pipeline emits a JSON structure like this. The LLM uses it to resolve element IDs to coordinates; the agent uses it to execute clicks.
 
 ```json
 {
@@ -69,9 +129,24 @@ The JSON files next to those images include the raw box data and labels. Tiny ex
 }
 ```
 
+- **id** — Unique identifier the model references in its action (e.g. `"element_id": 12`).
+- **type** — Semantic role: `button`, `link`, `textfield`, `checkbox`, `menuitem`, etc.
+- **label** — Visible or accessible text when available.
+- **x1, y1, x2, y2** — Bounding box in screenshot coordinates.
+- **click_x, click_y** — Preferred click point (often the center; adjusted for small targets).
+
+### Implementation notes
+
+- **UI ↔ backend:** The React app connects to `ws://127.0.0.1:8765`. The Python `agent_server.py` orchestrates runs and streams status, text deltas, and screenshot paths back to the UI.
+- **agent.py:** Owns the main loop. Each iteration: screenshot → vision (if needed) → prompt build → LLM call → parse action → typeandclick → repeat.
+- **vision.py:** VLM-first with CV fallback. Outputs annotated image + JSON. Supports Florence-2 and other backends via env vars.
+- **typeandclick.py:** Wraps pyautogui for click, type, scroll, hotkey. Handles coordinate scaling and safe failure when the display is unavailable.
+
+---
+
 ## What this project is
 
-- A tiny desktop app with a chat UI
+- A desktop app with a chat UI for the screen-reading agent
 - A Python agent that sees the screen and decides what to do
 - A vision pipeline that finds clickable UI elements
 - A real action layer that clicks and types on macOS
@@ -81,18 +156,6 @@ The JSON files next to those images include the raw box data and labels. Tiny ex
 - A production ready automation system
 - A guaranteed reliable agent
 - A full OS replacement
-
-## Quick mental model
-
-Think of it like this:
-
-1. You say the goal in the UI
-2. The agent takes a screenshot
-3. The model decides the next action
-4. The action layer clicks or types
-5. Repeat until done or stopped
-
-In plain words, it is just a loop of screenshot then think then act.
 
 ## Project structure
 
@@ -104,32 +167,6 @@ The app uses both the desktop folder and the v1 root folder.
 | v1 root | Python backend. The Electron app starts agent_server.py, which uses agent.py, vision.py, and typeandclick.py. |
 
 When you launch the app, Electron starts the Python server using the v1 root path. If the Python files are missing, the UI will not work.
-
-## How it works, for real
-
-### 1. The UI and server handshake
-
-The React UI connects to a local WebSocket at ws://127.0.0.1:8765 and streams in steps. The Python server emits status updates, text deltas, and screenshots as the agent works.
-
-### 2. The agent loop
-
-agent.py owns the main loop. Every step it:
-
-- Takes a screenshot
-- Runs vision if needed
-- Builds a prompt for the model
-- Parses the action JSON
-- Calls typeandclick.py to execute the action
-
-### 3. The vision pipeline
-
-vision.py is a mix of semantic detection and classical CV. In auto mode it tries a VLM first, then falls back to CV if needed. It also annotates a screenshot with element IDs so the model can point to a target instead of guessing coordinates.
-
-You will see this kind of annotated output in the UI and in the sample files above.
-
-### 4. The action layer
-
-typeandclick.py is the boring but important part. It uses pyautogui to click, type, scroll, and press keys. It also checks screen size and fails safely if the display is not available.
 
 ## Why this exists
 
