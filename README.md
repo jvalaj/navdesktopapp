@@ -1,9 +1,6 @@
-# Nav (v1)
+# Nav 
 
-- A tiny desktop app with a chat UI
-- A Python agent that sees the screen and decides what to do
-- A vision pipeline that finds clickable UI elements
-- A real action layer that clicks and types on macOS
+An open-source desktop agent that can see your screen, reason about what’s on it, and perform real actions on macOS.
 
 ## App walkthrough
 
