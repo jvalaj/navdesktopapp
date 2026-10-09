@@ -9,6 +9,25 @@ An open-source desktop agent that can see your screen, reason about what’s on 
 - **Understand**: a vision-language model reasons over the annotated screenshot and chooses the next action.
 - **Interact**: the action layer executes clicks and keystrokes on the real desktop.
 
+### The vision output — what the model sees
+
+The annotated screenshots are what the LLM receives. Each interactive element gets a bounding box and an ID. The model says "click element 12" instead of "click at (1082, 932)"—which is more reliable across resolutions and layouts.
+
+<table>
+	<tr>
+		<td>
+			<img src="readme/test2_ui_everything_annotated.png" width="360" alt="Annotated UI — vision pipeline output" />
+		</td>
+		<td>
+			<img src="mac_ui_outputs/test_ui_everything_annotated.png" width="360" alt="Another annotated UI example" />
+		</td>
+	</tr>
+	<tr>
+		<td colspan="2" style="padding-top: 8px; font-size: 13px; color: #666;">
+			<strong>What you're seeing:</strong> The raw screenshot with bounding boxes and IDs overlaid. Each box corresponds to a detected UI element. The companion JSON files (<code>test2_ui_everything.json</code>, <code>test_ui_everything.json</code>) contain the exact coordinates and labels.
+		</td>
+	</tr>
+</table>
 
 The core loop: **perceive → reason → act → perceive again**. The flowchart below shows the full cycle. Images are in `readme/` and `mac_ui_outputs/`.
 
@@ -31,25 +50,7 @@ The core loop: **perceive → reason → act → perceive again**. The flowchart
 
 The React UI streams this loop in real time: each step, screenshot, and action appears in the ActivityTrace so you can see exactly what the agent did.
 
-### The vision output — what the model sees
 
-The annotated screenshots are what the LLM receives. Each interactive element gets a bounding box and an ID. The model says "click element 12" instead of "click at (1082, 932)"—which is more reliable across resolutions and layouts.
-
-<table>
-	<tr>
-		<td>
-			<img src="readme/test2_ui_everything_annotated.png" width="360" alt="Annotated UI — vision pipeline output" />
-		</td>
-		<td>
-			<img src="mac_ui_outputs/test_ui_everything_annotated.png" width="360" alt="Another annotated UI example" />
-		</td>
-	</tr>
-	<tr>
-		<td colspan="2" style="padding-top: 8px; font-size: 13px; color: #666;">
-			<strong>What you're seeing:</strong> The raw screenshot with bounding boxes and IDs overlaid. Each box corresponds to a detected UI element. The companion JSON files (<code>test2_ui_everything.json</code>, <code>test_ui_everything.json</code>) contain the exact coordinates and labels.
-		</td>
-	</tr>
-</table>
 
 ### The box schema — structured UI representation
 
